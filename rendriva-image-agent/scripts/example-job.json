@@ -1,0 +1,24 @@
+{
+  "prompt": "Create a premium studio campaign for a matte black reusable water bottle",
+  "count": 3,
+  "mode": "scenes",
+  "scenes": [
+    "Three-quarter hero view with a restrained warm-neutral background",
+    "Side profile with intentional copy-safe negative space on the left",
+    "Macro material close-up showing the matte finish and lid detail"
+  ],
+  "preset": "product-photography",
+  "quality": "high",
+  "format": "png",
+  "size": "1024x1024",
+  "professional_designer_mode": true,
+  "preserve": [
+    "matte black finish",
+    "cylindrical silhouette",
+    "minimal unbranded appearance"
+  ],
+  "avoid": [
+    "extra bottles",
+    "floating props"
+  ]
+}

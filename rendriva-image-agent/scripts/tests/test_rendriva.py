@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "rendriva.py"
+SPEC = importlib.util.spec_from_file_location("rendriva", MODULE_PATH)
+rendriva = importlib.util.module_from_spec(SPEC)
+assert SPEC and SPEC.loader
+sys.modules[SPEC.name] = rendriva
+SPEC.loader.exec_module(rendriva)
+
+
+def base_job(**overrides):
+    job = {
+        "prompt": "Premium commercial product image of a matte black bottle",
+        "count": 1,
+        "mode": "variations",
+        "preset": "product-photography",
+        "size": "1024x1024",
+        "quality": "high",
+        "format": "png",
+    }
+    job.update(overrides)
+    return job
+
+
+class RecordingProvider(rendriva.MockProvider):
+    def __init__(self):
+        self.create_calls = []
+        self.failed_first_image = False
+
+    def create(self, spec, prompt, n=1):
+        self.create_calls.append(n)
+        return super().create(spec, prompt, n=n)
+
+    def judge(self, spec, image_path, prompt):
+        if image_path.name == "image-01.png" and not self.failed_first_image:
+            self.failed_first_image = True
+            result = super().judge(spec, image_path, prompt)
+            result["gates_pass"] = False
+            result["scores"]["composition_spacing"] = 2
+            result["defects"] = ["The focal point is weak and the spacing is accidental."]
+            result["repair_prompt"] = "Strengthen the focal point and use a disciplined grid."
+            return result
+        return super().judge(spec, image_path, prompt)
+
+
+class PartialFailureProvider(rendriva.MockProvider):
+    def create(self, spec, prompt, n=1):
+        if "Blocked scene" in prompt:
+            raise rendriva.ProviderError("Synthetic provider failure")
+        return super().create(spec, prompt, n=n)
+
+
+class RendrivaTests(unittest.TestCase):
+    def test_rejects_more_than_ten_outputs(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(count=11))
+
+    def test_ten_outputs_are_separate_and_numbered(self):
+        spec = rendriva.normalize_job(base_job(count=10))
+        plan = rendriva.build_plan(spec)
+        self.assertEqual(len(plan), 10)
+        self.assertEqual(plan[0]["file"], "image-01.png")
+        self.assertEqual(plan[-1]["file"], "image-10.png")
+        self.assertEqual(len({item["file"] for item in plan}), 10)
+
+    def test_scene_count_must_match(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(mode="scenes", count=2, scenes=["Hero view"]))
+
+    def test_compiled_prompt_forbids_collage(self):
+        spec = rendriva.normalize_job(base_job(count=2))
+        prompt = rendriva.compile_prompt(spec, rendriva.build_plan(spec)[0])
+        self.assertIn("exactly one standalone image", prompt.lower())
+        self.assertIn("do not create a collage", prompt.lower())
+        self.assertIn("professional designer", prompt.lower())
+
+    def test_dry_plan_is_stable(self):
+        spec = rendriva.normalize_job(base_job(count=3))
+        self.assertEqual(rendriva.stable_job_id(spec), rendriva.stable_job_id(spec))
+
+    def test_mock_end_to_end_creates_ten_files_and_zip(self):
+        spec = rendriva.normalize_job(base_job(count=10, quality="medium"))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            self.assertTrue(all(item["status"] == "PASS" for item in manifest["outputs"]))
+            for index in range(1, 11):
+                self.assertTrue((job_dir / f"image-{index:02d}.png").is_file())
+            with zipfile.ZipFile(job_dir / "rendriva-output.zip") as archive:
+                names = set(archive.namelist())
+            self.assertIn("image-01.png", names)
+            self.assertIn("image-10.png", names)
+            self.assertIn("manifest.json", names)
+            self.assertIn("quality-report.json", names)
+            self.assertNotIn("collage.png", names)
+
+    def test_repairs_only_the_failed_output(self):
+        provider = RecordingProvider()
+        spec = rendriva.normalize_job(base_job(count=2))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), provider)
+        self.assertEqual(provider.create_calls, [2, 1])
+        self.assertEqual(manifest["outputs"][0]["repair_attempts"], 1)
+        self.assertEqual(manifest["outputs"][1]["repair_attempts"], 0)
+        self.assertTrue(all(item["status"] == "PASS" for item in manifest["outputs"]))
+
+    def test_exact_text_layer_is_recorded(self):
+        spec = rendriva.normalize_job(
+            base_job(
+                text_safe_mode=True,
+                text_layers=[
+                    {
+                        "text": "PAYDAY SALE",
+                        "x": 0.08,
+                        "y": 0.08,
+                        "max_width": 0.84,
+                        "font_size": 52,
+                        "color": "#111111",
+                    }
+                ],
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+        self.assertTrue(manifest["outputs"][0]["text_overlay"]["applied"])
+
+    def test_duplicate_job_requires_resume(self):
+        spec = rendriva.normalize_job(base_job())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rendriva.execute(spec, root, rendriva.MockProvider())
+            with self.assertRaises(rendriva.RendrivaError):
+                rendriva.execute(spec, root, rendriva.MockProvider())
+            job_dir, manifest = rendriva.execute(spec, root, rendriva.MockProvider(), resume=True)
+            self.assertTrue(job_dir.is_dir())
+            self.assertEqual(manifest["outputs"][0]["status"], "PASS")
+
+    def test_scene_failure_preserves_successful_outputs(self):
+        spec = rendriva.normalize_job(
+            base_job(
+                mode="scenes",
+                count=3,
+                scenes=["Hero scene", "Blocked scene", "Detail scene"],
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), PartialFailureProvider())
+            statuses = [item["status"] for item in manifest["outputs"]]
+            self.assertEqual(statuses.count("PASS"), 2)
+            self.assertEqual(statuses.count("FAILED"), 1)
+            self.assertTrue((job_dir / "image-01.png").is_file())
+            self.assertTrue((job_dir / "image-03.png").is_file())
+            self.assertFalse((job_dir / "image-02.png").exists())
+
+    def test_locked_layer_is_composited_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layer_path = root / "product.png"
+            layer = rendriva.Image.new("RGBA", (200, 300), (220, 30, 30, 0))
+            draw = rendriva.ImageDraw.Draw(layer)
+            draw.rectangle((20, 20, 180, 280), fill=(220, 30, 30, 255))
+            layer.save(layer_path)
+            spec = rendriva.normalize_job(
+                base_job(
+                    locked_layers=[
+                        {
+                            "path": str(layer_path),
+                            "x": 0.75,
+                            "y": 0.5,
+                            "max_width": 0.35,
+                            "max_height": 0.7,
+                            "anchor": "center",
+                        }
+                    ]
+                )
+            )
+            _, manifest = rendriva.execute(spec, root / "runs", rendriva.MockProvider())
+            composite = manifest["outputs"][0]["locked_layer_composite"]
+            self.assertTrue(composite["applied"])
+            self.assertEqual(len(composite["layers"]), 1)
+
+    def test_reference_and_locked_layers_cannot_be_combined(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "product.png"
+            rendriva.Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(image_path)
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(
+                    base_job(
+                        operation="edit",
+                        reference_images=[str(image_path)],
+                        locked_layers=[{"path": str(image_path)}],
+                    )
+                )
+
+    def test_judge_receives_reference_and_final_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.png"
+            output = root / "output.png"
+            rendriva.Image.new("RGB", (1024, 1024), (10, 10, 10)).save(reference)
+            rendriva.Image.new("RGB", (1024, 1024), (20, 20, 20)).save(output)
+            spec = rendriva.normalize_job(
+                base_job(operation="edit", reference_images=[str(reference)])
+            )
+            vision_result = rendriva.MockProvider().judge(spec, output, "prompt")
+            captured = {}
+
+            def fake_request(url, api_key, **kwargs):
+                captured.update(kwargs["json_body"])
+                return {"output_text": json.dumps(vision_result)}
+
+            with patch.object(rendriva, "api_request", side_effect=fake_request):
+                result = rendriva.OpenAIProvider("test-key").judge(spec, output, "prompt")
+            content = captured["input"][0]["content"]
+            self.assertEqual(sum(item["type"] == "input_image" for item in content), 2)
+            self.assertTrue(result["gates_pass"])
+
+    def test_quality_prompt_lists_exact_text(self):
+        spec = rendriva.normalize_job(
+            base_job(text_layers=[{"text": "PAYDAY SALE"}, {"text": "₱299"}])
+        )
+        prompt = rendriva.quality_prompt(spec, "generation prompt")
+        self.assertIn("PAYDAY SALE", prompt)
+        self.assertIn("₱299", prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()
