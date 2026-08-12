@@ -63,13 +63,16 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Detect or accept explicit reference roles and views, then build multi-view product identity packs.
 - Apply the derived palette only to unprotected design elements and record its colors plus source fingerprints in the manifest.
 - Load and emit reusable shop brand profiles; lock shared campaign tokens while enforcing distinct batch compositions.
+- Compare the complete campaign batch visually and repair only identified outliers when Campaign Vision Lock is enabled.
+- Build whole-asset or masked product truth regions and block `PASS` when a required region is missing or visibly changed.
+- Optionally generate low-cost draft candidates, select distinct high-scoring concepts, and promote only those candidates to final quality.
 - Record each locked layer's role and SHA-256 source fingerprint in the manifest; never generatively repair inside a source-derived layer.
 - Optionally cut a product out from a simple flat background, add a natural shadow, wrap exact typography with automatic contrast, and add supplied marketplace copy without invented claims.
 - Run structural checks and, by default, a vision-based professional-design judge.
 - Reject deterministic near-duplicates and create separate contain-scaled platform exports when requested.
 - Regenerate only an item marked `NEEDS_REPAIR`, once by default.
 - Persist progress after every material step so `--resume` skips completed items.
-- Package successful outputs, brand/fidelity/diversity/campaign reports, and optional platform exports into `rendriva-output.zip`.
+- Package successful outputs, brand/fidelity/diversity/campaign/draft-selection reports, and optional draft/platform exports into `rendriva-output.zip`.
 
 ## Native ChatGPT behavior
 

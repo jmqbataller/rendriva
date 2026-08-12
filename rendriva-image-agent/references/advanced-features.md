@@ -1,6 +1,6 @@
 # Rendriva advanced features
 
-Rendriva 1.3 adds ten production controls while preserving the original one-to-ten separate-output contract.
+Rendriva 1.4 adds verified cross-image campaign review, product-region truth contracts, and draft-to-final promotion while preserving the original one-to-ten separate-output contract.
 
 ## Reference Intelligence and multi-view identity
 
@@ -43,6 +43,69 @@ Campaign tokens remain stable while each output receives a different camera/comp
 ```
 
 The deterministic diversity gate compares completed outputs and repairs or fails near-duplicates. Campaign and diversity reports document both controls.
+
+### Campaign Vision Lock
+
+For campaigns with at least two passing outputs, cross-image vision review is enabled by default. It compares the complete batch for shared palette logic, typography, logo treatment, product-scale rhythm, lighting, grid/spacing, and meaningful diversity. Only identified outliers are repaired.
+
+```json
+{
+  "campaign": {
+    "id": "payday-august",
+    "vision_lock": {
+      "enabled": true,
+      "min_score": 4.0,
+      "max_repair_attempts": 1
+    }
+  }
+}
+```
+
+`campaign-report.json` claims cross-image verification only when the batch judge actually ran. Disabling the vision judge leaves the report explicitly unverified.
+
+## Product Region Truth Map
+
+Protected product and logo references automatically receive whole-asset silhouette/material/logo truth contracts. For precise print, label, stitching, fabric, or color regions, supply normalized bounds and an optional same-size mask.
+
+```json
+{
+  "product_truth_map": {
+    "regions": [
+      {
+        "name": "front-chest-print",
+        "role": "print",
+        "source_path": "./shirt-front.png",
+        "mask_path": "./front-print-mask.png",
+        "bbox": [0.22, 0.18, 0.56, 0.46],
+        "preserve": ["exact artwork geometry", "exact ink colors"],
+        "required": true
+      }
+    ]
+  }
+}
+```
+
+Supported roles are `silhouette`, `fabric`, `texture`, `construction`, `print`, `logo`, `label`, `color`, `stitching`, `material`, and `identity`. Every required region receives a named QA result. A missing or failed required region blocks `PASS`.
+
+## Draft-to-Final Workflow
+
+Generate low-quality concepts, score them, select distinct candidates, then promote only the selected drafts to final quality. Exact typography is withheld from promotion sources and applied only after final rendering.
+
+```json
+{
+  "count": 3,
+  "quality": "high",
+  "draft_to_final": {
+    "enabled": true,
+    "candidate_count": 6,
+    "draft_quality": "low",
+    "selection_mode": "auto-score",
+    "include_drafts": true
+  }
+}
+```
+
+For manual selection, set `selection_mode` to `manual` and provide exactly one unique candidate number per final output, for example `"selection": [4, 1, 6]`. The adapter records the full decision in `draft-selection-report.json` and preserves selected drafts as promotion evidence when requested.
 
 ## Automatic cutout and natural shadow
 
@@ -158,4 +221,6 @@ The ZIP can contain:
 - `reference-fidelity-report.json`;
 - `diversity-report.json`;
 - `campaign-report.json`;
+- `draft-selection-report.json`;
+- optional individual `drafts/draft-XX` candidates;
 - individual `platform-exports/*.png` files.

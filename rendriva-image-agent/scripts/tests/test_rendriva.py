@@ -72,6 +72,39 @@ class ShortBatchProvider(rendriva.MockProvider):
         return super().create(spec, prompt, n=1)
 
 
+class CampaignOutlierProvider(rendriva.MockProvider):
+    def __init__(self):
+        self.campaign_calls = 0
+
+    def judge_campaign(self, spec, images):
+        self.campaign_calls += 1
+        result = super().judge_campaign(spec, images)
+        if self.campaign_calls == 1:
+            result["passed"] = False
+            result["outlier_indices"] = [2]
+            result["defects_by_index"] = [{"index": 2, "defects": ["Logo safe-zone and lighting family drift from the campaign."]}]
+            result["repair_prompts"] = [{"index": 2, "prompt": "Restore the shared logo safe zone and lighting family while retaining a distinct composition."}]
+        return result
+
+
+class DraftRecordingProvider(rendriva.MockProvider):
+    def __init__(self):
+        self.create_calls = []
+        self.create_prompts = []
+        self.create_text_layers = []
+        self.promotions = []
+
+    def create(self, spec, prompt, n=1):
+        self.create_calls.append({"quality": spec["quality"], "n": n})
+        self.create_prompts.append(prompt)
+        self.create_text_layers.append(spec["text_layers"])
+        return super().create(spec, prompt, n=n)
+
+    def promote(self, spec, prompt, draft_path, n=1):
+        self.promotions.append(draft_path.name)
+        return super().promote(spec, prompt, draft_path, n=n)
+
+
 class RendrivaTests(unittest.TestCase):
     def test_rejects_more_than_ten_outputs(self):
         with self.assertRaises(rendriva.ValidationError):
@@ -331,6 +364,29 @@ class RendrivaTests(unittest.TestCase):
             self.assertEqual(sum(item["type"] == "input_image" for item in content), 2)
             self.assertTrue(result["gates_pass"])
 
+    def test_judge_receives_external_truth_source_and_mask(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.png"
+            truth_source = root / "artwork.png"
+            truth_mask = root / "artwork-mask.png"
+            output = root / "output.png"
+            for path, color in ((reference, "#111111"), (truth_source, "#AA4422"), (output, "#222222")):
+                rendriva.Image.new("RGB", (64, 64), color).save(path)
+            rendriva.Image.new("L", (64, 64), 255).save(truth_mask)
+            spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(reference)], product_truth_map={"regions": [{"name": "front-artwork", "role": "print", "source_path": str(truth_source), "mask_path": str(truth_mask)}]}))
+            vision_result = rendriva.MockProvider().judge(spec, output, "prompt")
+            captured = {}
+
+            def fake_request(url, api_key, **kwargs):
+                captured.update(kwargs["json_body"])
+                return {"output_text": json.dumps(vision_result)}
+
+            with patch.object(rendriva, "api_request", side_effect=fake_request):
+                rendriva.OpenAIProvider("test-key").judge(spec, output, "prompt")
+            content = captured["input"][0]["content"]
+            self.assertEqual(sum(item["type"] == "input_image" for item in content), 4)
+
     def test_quality_prompt_lists_exact_text(self):
         spec = rendriva.normalize_job(
             base_job(text_layers=[{"text": "PAYDAY SALE"}, {"text": "₱299"}])
@@ -524,8 +580,101 @@ class RendrivaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             job_dir, _ = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
             report = json.loads((job_dir / "campaign-report.json").read_text(encoding="utf-8"))
+        self.assertTrue(report["batch_visual_consistency_verified"])
+        self.assertTrue(report["batch_visual_consistency_passed"])
+        self.assertEqual(report["evidence_scope"], "cross-image-vision-comparison")
+
+    def test_campaign_vision_lock_repairs_only_the_outlier(self):
+        provider = CampaignOutlierProvider()
+        spec = rendriva.normalize_job(base_job(count=3, campaign={"id": "launch", "vision_lock": {"max_repair_attempts": 1}}))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), provider)
+        self.assertEqual(provider.campaign_calls, 2)
+        self.assertNotIn("campaign_repair_history", manifest["outputs"][0])
+        self.assertEqual(len(manifest["outputs"][1]["campaign_repair_history"]), 1)
+        self.assertNotIn("campaign_repair_history", manifest["outputs"][2])
+        self.assertTrue(manifest["campaign_visual_review"]["verified"])
+        self.assertTrue(manifest["campaign_visual_review"]["passed"])
+
+    def test_campaign_vision_lock_is_unverified_without_vision_judge(self):
+        spec = rendriva.normalize_job(base_job(count=2))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider(), use_vision_judge=False)
+            report = json.loads((job_dir / "campaign-report.json").read_text(encoding="utf-8"))
+        self.assertFalse(manifest["campaign_visual_review"]["verified"])
         self.assertFalse(report["batch_visual_consistency_verified"])
         self.assertEqual(report["evidence_scope"], "policy-and-per-output-qa")
+
+    def test_automatic_and_explicit_product_truth_regions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "shirt-front.png"
+            mask = root / "print-mask.png"
+            rendriva.Image.new("RGB", (64, 64), "#884422").save(product)
+            rendriva.Image.new("L", (64, 64), 255).save(mask)
+            automatic = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(product)]), root)
+            explicit = rendriva.normalize_job(
+                base_job(
+                    operation="edit",
+                    reference_images=[str(product)],
+                    product_truth_map={"regions": [{"name": "front-print", "role": "print", "source_path": "shirt-front.png", "mask_path": "print-mask.png", "bbox": [0.2, 0.2, 0.6, 0.6], "preserve": ["exact artwork geometry and ink colors"]}]},
+                ),
+                root,
+            )
+        self.assertEqual({region["role"] for region in automatic["product_truth_map"]["regions"]}, {"silhouette", "material"})
+        region = explicit["product_truth_map"]["regions"][0]
+        self.assertEqual(region["comparison_strategy"], "masked-vision-comparison")
+        self.assertEqual(len(region["source_sha256"]), 64)
+        self.assertEqual(len(region["mask_sha256"]), 64)
+        prompt = rendriva.compile_prompt(explicit, rendriva.build_plan(explicit)[0])
+        self.assertIn("PRODUCT REGION TRUTH MAP", prompt)
+        self.assertIn("front-print", prompt)
+
+    def test_required_truth_region_failure_blocks_pass(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            product = Path(temporary) / "product-front.png"
+            output = Path(temporary) / "output.png"
+            rendriva.Image.new("RGB", (64, 64), "#222222").save(product)
+            rendriva.Image.new("RGB", (1024, 1024), "#333333").save(output)
+            spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(product)]))
+            vision = rendriva.MockProvider().judge(spec, output, "prompt")
+            vision["region_fidelity"][0]["passed"] = False
+            review = rendriva.finalize_review(spec, rendriva.structural_review(spec, output), vision)
+        self.assertFalse(review["passed"])
+        self.assertIn("truth regions failed", " ".join(review["defects"]).lower())
+
+    def test_truth_region_mask_must_match_source_dimensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "product.png"
+            mask = root / "mask.png"
+            rendriva.Image.new("RGB", (64, 64), "#222222").save(product)
+            rendriva.Image.new("L", (32, 32), 255).save(mask)
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(operation="edit", reference_images=[str(product)], product_truth_map={"regions": [{"name": "logo", "role": "logo", "source_path": str(product), "mask_path": str(mask)}]}))
+
+    def test_draft_to_final_selects_candidates_and_promotes_only_selected(self):
+        provider = DraftRecordingProvider()
+        spec = rendriva.normalize_job(base_job(count=2, text_layers=[{"text": "PAYDAY SALE"}], draft_to_final={"candidate_count": 4, "draft_quality": "low", "include_drafts": True}))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), provider)
+            with zipfile.ZipFile(job_dir / "rendriva-output.zip") as archive:
+                names = set(archive.namelist())
+        self.assertEqual(provider.create_calls[0], {"quality": "low", "n": 4})
+        self.assertEqual(provider.create_text_layers[0], [])
+        self.assertNotIn("PAYDAY SALE", provider.create_prompts[0])
+        self.assertEqual(len(provider.promotions), 2)
+        self.assertEqual(manifest["draft_selection"]["selected_candidates"], [1, 2])
+        self.assertEqual([item["selected_draft_index"] for item in manifest["outputs"]], [1, 2])
+        self.assertIn("draft-selection-report.json", names)
+        self.assertIn("drafts/draft-01.png", names)
+        self.assertTrue(manifest["campaign_visual_review"]["passed"])
+
+    def test_manual_draft_selection_requires_one_unique_choice_per_final(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(count=2, draft_to_final={"candidate_count": 4, "selection_mode": "manual", "selection": [1]}))
+        spec = rendriva.normalize_job(base_job(count=2, draft_to_final={"candidate_count": 4, "selection_mode": "manual", "selection": [4, 2]}))
+        self.assertEqual(spec["draft_to_final"]["selection"], [4, 2])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, and any request for multiple individually downloadable images. Apply professional art direction, automatically derive the brand palette from any supplied reference image, enforce strict source-asset locks for product fabric, texture, construction, print, and logos, and use per-image quality judging and targeted repair so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, campaign batches, draft selection, and any request for multiple individually downloadable images. Apply professional art direction, reference-derived brand palettes, strict product-region truth locks, draft-to-final promotion, cross-image Campaign Vision Lock, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
@@ -102,6 +102,24 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 - Apply stable campaign palette, typography, logo-safe-zone, grid, and spacing tokens to all outputs in a campaign.
 - Compare passing batch outputs for near-duplicates. Repair or fail an item that exceeds the configured similarity threshold.
 - Keep campaign consistency and batch diversity as separate checks: consistent does not mean duplicated.
+- When Campaign Vision Lock is enabled, compare all passing outputs together for palette, typography, logo treatment, product-scale rhythm, lighting, grid, spacing, and meaningful diversity.
+- Repair only indices identified as campaign outliers. Never regenerate a passing campaign member merely because another image drifted.
+- Claim cross-image campaign verification only when the batch vision judge actually ran and passed.
+
+## Enforce product truth regions
+
+- Build automatic whole-asset silhouette, material, and logo truth contracts from protected sources.
+- Use explicit normalized bounds and optional same-size masks when the user identifies a print, label, stitching, fabric, texture, color, construction, logo, material, silhouette, or identity region.
+- Return one named `region_fidelity` QA result for every configured region. Any missing or failed required region blocks `PASS`.
+- Keep literal-source-composite evidence distinct from masked or bounded vision comparison; never describe vision comparison as pixel identity.
+
+## Promote drafts to final quality
+
+- When `draft_to_final` is enabled, generate low-quality composition candidates before final rendering.
+- Auto-selection must choose the highest-scoring candidates that also satisfy batch diversity; manual selection must contain one unique candidate per requested final.
+- Promote only selected drafts, preserving their composition, camera, hierarchy, and negative-space plan while final reference and truth-region locks remain authoritative.
+- Do not place exact text onto promotion-source drafts. Apply exact typography only after final rendering.
+- Record every candidate, score, selection, and final mapping in `draft-selection-report.json`.
 
 ## Prepare production exports
 
@@ -127,7 +145,7 @@ Require all non-negotiable gates to pass and an average professional-design scor
 
 - Present each image separately with its index and status.
 - For native generated images, let the host display and retain them; do not reconstruct them merely to make a ZIP.
-- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, optional platform exports, and `rendriva-output.zip`.
+- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, `draft-selection-report.json`, optional drafts/platform exports, and `rendriva-output.zip`.
 - Report exact failures and blocked capabilities. Never call a run complete beyond the available evidence.
 
 ## Production presets
