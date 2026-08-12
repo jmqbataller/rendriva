@@ -20,11 +20,14 @@ Fail an output when any applicable condition is true:
 
 - It is a collage, grid, contact sheet, storyboard, or multi-panel output when separate images were requested.
 - It misses a required subject, scene, product, logo, exact copy, or reference lock.
+- A supplied product changes silhouette, proportions, construction, material, fabric weave, fibers, texture, finish, stitching, seams, folds, print, color, label, or product-specific detail.
+- A supplied logo changes symbol geometry, lettering, spelling, spacing, color, aspect ratio, placement, or edge shape; is cropped or distorted; or is replaced with a generated approximation.
 - Critical text is misspelled, unreadable, cropped, or distorted.
 - The main product or subject is unintentionally cropped.
 - A face, hand, logo, product, pattern, or material has a severe artifact.
 - The requested dimensions, transparency, or file format are wrong.
 - It contains a prohibited object or invented brand/product detail.
+- It ignores an automatically extracted reference palette and introduces unrelated dominant colors without a purposeful contrast or accessibility reason.
 
 ## Scored dimensions
 
@@ -59,3 +62,5 @@ Treat these as evidence to investigate, not an automatic aesthetic ban. A reques
 ## Repair policy
 
 Write a repair prompt that names the observed defect, restates the locked details, and describes the corrected professional outcome. Do not broadly redesign an image when a localized edit can fix it. Retry only the affected output and keep at most the best passing result.
+
+Do not use generative repair inside a strict source-derived product or logo layer. Repair the background or layout, then composite the original protected source again. If strict generative reference fidelity cannot be compared with the source, do not pass the output.

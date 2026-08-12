@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import colorsys
 import copy
 import hashlib
 import io
@@ -12,6 +13,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import signal
 import sys
 import threading
@@ -31,7 +33,7 @@ except ImportError:  # pragma: no cover - handled with a focused runtime error
     Image = ImageColor = ImageDraw = ImageFont = None
 
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -39,7 +41,15 @@ VALID_QUALITIES = {"low", "medium", "high", "auto"}
 VALID_BACKGROUNDS = {"opaque", "transparent", "auto"}
 VALID_MODES = {"variations", "scenes"}
 VALID_OPERATIONS = {"generate", "edit", "variation"}
+VALID_FIDELITY_MODES = {"none", "guided", "strict"}
 VALID_STATUSES = {"QUEUED", "GENERATING", "JUDGING", "NEEDS_REPAIR", "REPAIRING", "PASS", "FAILED", "BLOCKED"}
+
+STRICT_ASSET_LOCKS = [
+    "source product silhouette, proportions, construction, dimensions, and edge geometry",
+    "source material, fabric weave, texture, finish, stitching, folds, print, and color",
+    "source logo geometry, lettering, spacing, colors, placement, and aspect ratio",
+    "source labels, marks, and identifiers without redraw, recolor, retexture, reshaping, or invented detail",
+]
 
 PRESETS: dict[str, dict[str, Any]] = {
     "product-photography": {
@@ -162,6 +172,149 @@ def resolve_paths(items: list[str], base_dir: Path) -> list[str]:
     return resolved
 
 
+def _rgb_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def _color_distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> float:
+    return sum((a - b) ** 2 for a, b in zip(left, right)) ** 0.5
+
+
+def _color_saturation(rgb: tuple[int, int, int]) -> float:
+    return colorsys.rgb_to_hsv(*(channel / 255 for channel in rgb))[1]
+
+
+def _svg_color_candidates(path: Path) -> list[tuple[float, tuple[int, int, int]]]:
+    source = path.read_text(encoding="utf-8", errors="replace")
+    colors: list[tuple[int, int, int]] = []
+    for value in re.findall(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b", source):
+        digits = value[1:]
+        if len(digits) == 3:
+            digits = "".join(character * 2 for character in digits)
+        colors.append(tuple(int(digits[index : index + 2], 16) for index in (0, 2, 4)))
+    for groups in re.findall(r"rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)", source):
+        colors.append(tuple(min(255, int(value)) for value in groups))
+    unique = list(dict.fromkeys(colors))
+    if not unique:
+        raise ValidationError(f"No usable colors were found in SVG reference: {path}")
+    weight = 1.0 / len(unique)
+    return [(weight, color) for color in unique]
+
+
+def _raster_color_candidates(path: Path) -> list[tuple[float, tuple[int, int, int]]]:
+    if Image is None:
+        raise ValidationError("Pillow is required to extract a palette from raster reference images.")
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGBA")
+            image.thumbnail((160, 160), Image.Resampling.LANCZOS)
+            data = image.tobytes()
+            pixels = [
+                (data[index], data[index + 1], data[index + 2])
+                for index in range(0, len(data), 4)
+                if data[index + 3] >= 48
+            ]
+    except Exception as exc:
+        raise ValidationError(f"Could not extract a color palette from reference image {path}: {exc}") from exc
+    if not pixels:
+        raise ValidationError(f"Reference image has no visible pixels for palette extraction: {path}")
+    sample = Image.new("RGB", (len(pixels), 1))
+    sample.putdata(pixels)
+    quantized = sample.quantize(colors=min(12, len(set(pixels))), method=Image.Quantize.MEDIANCUT)
+    palette = quantized.getpalette() or []
+    counts = sorted(quantized.getcolors(maxcolors=256) or [], reverse=True)
+    total = sum(count for count, _index in counts) or 1
+    candidates: list[tuple[float, tuple[int, int, int]]] = []
+    for count, index in counts:
+        offset = index * 3
+        rgb = tuple(palette[offset : offset + 3])
+        if len(rgb) == 3:
+            candidates.append((count / total, rgb))
+    return candidates
+
+
+def extract_reference_palette(paths: list[str], max_colors: int = 5) -> list[str]:
+    candidates: list[tuple[float, tuple[int, int, int]]] = []
+    for source_index, value in enumerate(paths):
+        path = Path(value)
+        source_candidates = (
+            _svg_color_candidates(path) if path.suffix.lower() == ".svg" else _raster_color_candidates(path)
+        )
+        source_weight = 1.25 if source_index == 0 else 1.0
+        candidates.extend((weight * source_weight, rgb) for weight, rgb in source_candidates)
+    ranked = sorted(
+        candidates,
+        key=lambda item: (item[0] * (1 + 0.5 * _color_saturation(item[1]))),
+        reverse=True,
+    )
+    chromatic = [item for item in ranked if _color_saturation(item[1]) >= 0.12]
+    neutral = [item for item in ranked if _color_saturation(item[1]) < 0.12]
+    selected: list[tuple[int, int, int]] = []
+    for _weight, rgb in chromatic + neutral:
+        if all(_color_distance(rgb, existing) >= 28 for existing in selected):
+            selected.append(rgb)
+        if len(selected) == max_colors:
+            break
+    if not selected and ranked:
+        selected.append(ranked[0][1])
+    return [_rgb_hex(rgb) for rgb in selected]
+
+
+def normalize_brand(
+    value: Any,
+    base_dir: Path,
+    references: list[str],
+    locked_layers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValidationError("brand must be an object.")
+    brand = copy.deepcopy(value)
+    explicit_palette = brand.get("palette")
+    if explicit_palette is not None:
+        if not isinstance(explicit_palette, list) or any(
+            not isinstance(item, str) or not item.strip() for item in explicit_palette
+        ):
+            raise ValidationError("brand.palette must be a list of non-empty color strings.")
+        brand["palette"] = [item.strip() for item in explicit_palette]
+        brand["palette_source"] = "explicit"
+        brand["palette_sources"] = []
+        return brand
+
+    configured_sources = as_string_list(brand.get("palette_source_images"), "brand.palette_source_images")
+    if configured_sources:
+        palette_sources = resolve_paths(configured_sources, base_dir)
+    else:
+        logo_layers = [layer["path"] for layer in locked_layers if layer["role"] == "logo"]
+        other_layers = [layer["path"] for layer in locked_layers if layer["role"] != "logo"]
+        palette_sources = list(dict.fromkeys(logo_layers + references + other_layers))
+
+    auto_value = brand.get("auto_palette_from_references", bool(palette_sources))
+    if not isinstance(auto_value, bool):
+        raise ValidationError("brand.auto_palette_from_references must be true or false.")
+    max_colors = brand.get("palette_max_colors", 5)
+    if isinstance(max_colors, bool) or not isinstance(max_colors, int) or not 1 <= max_colors <= 8:
+        raise ValidationError("brand.palette_max_colors must be an integer from 1 through 8.")
+    brand["auto_palette_from_references"] = auto_value
+    brand["palette_max_colors"] = max_colors
+    if auto_value and palette_sources:
+        palette = extract_reference_palette(palette_sources, max_colors=max_colors)
+        if not palette:
+            raise ValidationError("Automatic palette extraction did not find any usable colors.")
+        brand["palette"] = palette
+        brand["palette_source"] = "auto-reference"
+        brand["palette_sources"] = [
+            {"path": path, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+            for path in palette_sources
+        ]
+        brand["palette_source_images"] = palette_sources
+    else:
+        brand["palette_source"] = "none"
+        brand["palette_sources"] = []
+    return brand
+
+
 def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -175,6 +328,7 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
         resolved_path = resolve_paths([path_value], base_dir)[0]
         layer = {
             "path": resolved_path,
+            "role": str(raw_layer.get("role", "product")),
             "x": float(raw_layer.get("x", 0.5)),
             "y": float(raw_layer.get("y", 0.5)),
             "max_width": float(raw_layer.get("max_width", 0.45)),
@@ -182,6 +336,10 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
             "anchor": raw_layer.get("anchor", "center"),
             "require_alpha": bool(raw_layer.get("require_alpha", True)),
         }
+        if layer["role"] not in {"product", "logo", "artwork", "identity", "protected-asset"}:
+            raise ValidationError(
+                f"locked_layers[{index}].role must be product, logo, artwork, identity, or protected-asset."
+            )
         for key in ("x", "y", "max_width", "max_height"):
             if not 0 <= layer[key] <= 1:
                 raise ValidationError(f"locked_layers[{index}].{key} must be from 0 through 1.")
@@ -248,9 +406,16 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if operation in {"edit", "variation"} and not references:
         raise ValidationError(f"operation='{operation}' requires at least one reference image.")
 
-    brand = raw.get("brand", {})
-    if not isinstance(brand, dict):
-        raise ValidationError("brand must be an object.")
+    fidelity_mode = str(raw.get("fidelity_mode", "strict" if references or locked_layers else "none"))
+    if fidelity_mode not in VALID_FIDELITY_MODES:
+        raise ValidationError(f"fidelity_mode must be one of: {', '.join(sorted(VALID_FIDELITY_MODES))}.")
+    if fidelity_mode != "none" and not references and not locked_layers:
+        raise ValidationError("fidelity_mode requires reference_images or locked_layers.")
+    preserve = as_string_list(raw.get("preserve"), "preserve")
+    if fidelity_mode == "strict":
+        preserve = list(dict.fromkeys(preserve + STRICT_ASSET_LOCKS))
+
+    brand = normalize_brand(raw.get("brand"), base_dir, references, locked_layers)
     text_layers = raw.get("text_layers", [])
     if not isinstance(text_layers, list) or any(not isinstance(item, dict) for item in text_layers):
         raise ValidationError("text_layers must be a list of objects.")
@@ -288,7 +453,8 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         "background": background,
         "reference_images": references,
         "locked_layers": locked_layers,
-        "preserve": as_string_list(raw.get("preserve"), "preserve"),
+        "fidelity_mode": fidelity_mode,
+        "preserve": preserve,
         "avoid": as_string_list(raw.get("avoid"), "avoid"),
         "brand": brand,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
@@ -360,6 +526,8 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
     brand_lines = []
     if brand.get("palette"):
         brand_lines.append(f"palette: {_join([str(value) for value in brand['palette']])}")
+    if brand.get("palette_source") == "auto-reference":
+        brand_lines.append("palette source: automatically extracted from the supplied authoritative reference images")
     if brand.get("tone"):
         brand_lines.append(f"tone: {brand['tone']}")
     if brand.get("fonts"):
@@ -381,7 +549,7 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
     locked_layer_rule = "No source-composited layer is configured."
     if spec["locked_layers"]:
         placements = [
-            f"layer {index}: reserve a clean unobstructed zone around ({layer['x']:.2f}, {layer['y']:.2f}) with maximum width {layer['max_width']:.2f} and height {layer['max_height']:.2f}"
+            f"{layer['role']} layer {index}: reserve a clean unobstructed zone around ({layer['x']:.2f}, {layer['y']:.2f}) with maximum width {layer['max_width']:.2f} and height {layer['max_height']:.2f}"
             for index, layer in enumerate(spec["locked_layers"], start=1)
         ]
         locked_layer_rule = (
@@ -390,6 +558,21 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             "The unchanged source-derived layer will be composited afterward. "
             + "; ".join(placements)
             + ". Keep every reserved zone free of conflicting objects, fake shadows, or duplicate products."
+        )
+    fidelity_rule = "No source asset is supplied."
+    if spec["fidelity_mode"] == "guided":
+        fidelity_rule = (
+            "Use the source as a visual reference, but treat fidelity as guided rather than literal. "
+            "Do not claim pixel-identical preservation."
+        )
+    elif spec["fidelity_mode"] == "strict":
+        strategy = "literal source compositing" if spec["locked_layers"] else "strict reference editing with mandatory comparison QA"
+        fidelity_rule = (
+            f"Use {strategy}. The supplied product, garment, artwork, or logo is authoritative and protected. "
+            "Do not redraw, reinterpret, retouch, recolor, reshape, restyle, retexture, smooth, sharpen, replace, or invent any protected detail. "
+            "Keep fabric weave, fibers, stitching, seams, folds, finish, print, color, silhouette, proportions, labels, and product construction unchanged. "
+            "Keep every logo's exact symbol, lettering, geometry, spacing, color, aspect ratio, and placement unchanged; never approximate it with generated text. "
+            "If the requested transformation conflicts with a protected asset, preserve the asset and modify only the background, staging, lighting environment, layout, or unprotected region."
         )
     if item.get("batch_variations"):
         scene = (
@@ -423,10 +606,14 @@ Build an intentional focal point and reading order. Use a disciplined grid, cred
 
 BRAND DIRECTION:
 {'; '.join(brand_lines) if brand_lines else 'No separate brand kit supplied; use a restrained, purpose-led visual system.'}
+Apply the brand palette to unprotected backgrounds, accents, typography, graphic shapes, and layout styling. Use dominant colors intentionally with suitable neutral support and readable contrast. Never recolor, tint, or alter a protected product, garment, artwork, or logo to force it into the palette.
 
 REFERENCE LOCKS:
 Preserve these details exactly where applicable: {_join(spec['preserve'])}.
 Do not invent product features, logos, wording, accessories, achievements, or brand details.
+
+REFERENCE FIDELITY POLICY ({spec['fidelity_mode'].upper()}):
+{fidelity_rule}
 
 SOURCE COMPOSITE POLICY:
 {locked_layer_rule}
@@ -642,12 +829,32 @@ def quality_schema() -> dict[str, Any]:
 
 def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
     expected_text = [layer["text"] for layer in spec["text_layers"]]
+    fidelity_gate = "No reference-fidelity gate applies."
+    if spec["fidelity_mode"] == "guided":
+        fidelity_gate = "Assess reference similarity as guidance and report material drift, but do not require literal source identity."
+    elif spec["fidelity_mode"] == "strict":
+        fidelity_gate = (
+            "STRICT SOURCE-ASSET GATE: mark reference_preservation false and fail the gates for any change to product silhouette, proportions, construction, fabric weave, fibers, texture, finish, stitching, seams, folds, print, color, label, or logo. "
+            "A logo fails for altered symbol geometry, lettering, spelling, spacing, color, aspect ratio, placement, cropping, distortion, redraw, or generated approximation. "
+            "Do not excuse drift because the result is visually attractive."
+        )
+    palette_gate = ""
+    if spec["brand"].get("palette_source") == "auto-reference":
+        palette_gate = (
+            f"REFERENCE-DERIVED BRAND PALETTE: {_join(spec['brand']['palette'])}. "
+            "Judge whether unprotected backgrounds, accents, typography, and design elements use this palette coherently. "
+            "Penalize unrelated dominant colors, but do not require or permit recoloring any protected source asset."
+        )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
 {generation_prompt}
 
 Fail the gates if the image is a collage/grid/multi-panel output, misses required content, changes locked reference details, contains severe visual artifacts, crops the main subject unintentionally, invents prohibited brand/product details, or renders critical text incorrectly. The exact required text strings are: {_join(expected_text)}. If no reference or critical text applies, mark that gate true.
+
+{fidelity_gate}
+
+{palette_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -729,9 +936,13 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
         applied.append(
             {
                 "path": layer["path"],
+                "role": layer["role"],
+                "source_sha256": hashlib.sha256(Path(layer["path"]).read_bytes()).hexdigest(),
                 "position": [x, y],
                 "size": [target[0], target[1]],
                 "source_alpha": has_alpha,
+                "source_derived": True,
+                "generatively_redrawn": False,
             }
         )
     output_format = image_path.suffix.lower().lstrip(".")
@@ -739,7 +950,12 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
         canvas.convert("RGB").save(image_path, format="JPEG", quality=95)
     else:
         canvas.save(image_path, format=output_format.upper())
-    return {"applied": True, "layers": applied}
+    return {
+        "applied": True,
+        "layers": applied,
+        "strategy": "literal-source-composite",
+        "protected_source_count": len(applied),
+    }
 
 
 def apply_text_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[str, Any]:
@@ -831,6 +1047,19 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
             "vision": vision,
         }
     if vision is None:
+        strict_reference_unverified = (
+            spec["fidelity_mode"] == "strict" and bool(spec["reference_images"]) and not spec["locked_layers"]
+        )
+        if strict_reference_unverified:
+            return {
+                "passed": False,
+                "average_score": None,
+                "defects": ["Strict generative reference fidelity was not verified because the vision judge is disabled."],
+                "repair_prompt": "Enable reference-aware vision judging or use locked_layers for source-derived compositing.",
+                "structural": structural,
+                "vision": None,
+                "evidence_note": "Strict fidelity cannot pass without comparison evidence.",
+            }
         return {
             "passed": True,
             "average_score": None,
@@ -844,6 +1073,8 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
     values = [float(scores.get(name, 0)) for name in SCORED_DIMENSIONS]
     average = sum(values) / len(values)
     gates = bool(vision.get("gates_pass")) and not bool(vision.get("collage_violation"))
+    if spec["fidelity_mode"] == "strict" and (spec["reference_images"] or spec["locked_layers"]):
+        gates = gates and bool(vision.get("reference_preservation"))
     passed = gates and average >= spec["min_professional_score"]
     defects.extend(str(value) for value in vision.get("defects", []))
     if average < spec["min_professional_score"]:
@@ -1042,6 +1273,24 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
         "job_id": job_id,
         "created_at": now,
         "updated_at": now,
+        "fidelity": {
+            "mode": spec["fidelity_mode"],
+            "strategy": (
+                "literal-source-composite"
+                if spec["locked_layers"]
+                else "strict-generative-reference"
+                if spec["fidelity_mode"] == "strict" and spec["reference_images"]
+                else "guided-reference"
+                if spec["fidelity_mode"] == "guided"
+                else "none"
+            ),
+            "literal_source_preservation": bool(spec["locked_layers"]),
+        },
+        "brand_palette": {
+            "colors": spec["brand"].get("palette", []),
+            "source": spec["brand"].get("palette_source", "none"),
+            "sources": spec["brand"].get("palette_sources", []),
+        },
         "spec": spec,
         "outputs": build_plan(spec),
     }

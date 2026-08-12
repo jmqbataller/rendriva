@@ -5,9 +5,11 @@
 1. Minimal variation job
 2. Scene-list job
 3. Reference and brand locks
-4. Literal source compositing
-5. Exact text layers
-6. Supported fields
+4. Automatic reference palette
+5. Strict product and logo fidelity
+6. Literal source compositing
+7. Exact text layers
+8. Supported fields
 
 ## Minimal variation job
 
@@ -38,6 +40,43 @@
   "professional_designer_mode": true
 }
 ```
+
+Reference jobs default to `"fidelity_mode": "strict"`. Use `"guided"` only when the source is inspiration and controlled variation is allowed.
+
+## Strict product and logo fidelity
+
+```json
+{
+  "prompt": "Place this exact shirt in a premium marketplace banner",
+  "operation": "edit",
+  "reference_images": ["./shirt-front.png"],
+  "fidelity_mode": "strict",
+  "preserve": [
+    "exact shirt length and construction",
+    "exact fabric weave, texture, stitching, folds, print, and color"
+  ]
+}
+```
+
+Strict mode prohibits redraw, recolor, reshape, retexture, logo approximation, and invented product detail. The comparison judge must fail visible drift. A generative reference edit is high fidelity, not literal preservation. Use source-derived `locked_layers` whenever the original pixels must remain protected, and always use them for an exact supplied logo when a transparent source is available.
+
+## Automatic reference palette
+
+Every supplied reference image becomes a palette source by default. If several references exist, Rendriva combines distinct dominant colors and prioritizes a locked logo layer. Explicit `brand.palette` values override automatic extraction.
+
+```json
+{
+  "prompt": "Create a premium shop banner using the visual identity of these references",
+  "operation": "edit",
+  "reference_images": ["./shop-reference.png", "./product-reference.png"],
+  "brand": {
+    "auto_palette_from_references": true,
+    "palette_max_colors": 5
+  }
+}
+```
+
+Use `brand.palette_source_images` to select specific palette sources. The adapter records the extracted colors, resolved source paths, and SHA-256 fingerprints in `manifest.json`. Palette colors control unprotected backgrounds, accents, typography, and graphic elements; they never authorize recoloring a protected source asset.
 
 When `scenes` is present, `count` defaults to its length and must match it when explicitly provided.
 
@@ -75,18 +114,29 @@ Use `locked_layers` when generative edits are not accurate enough and the produc
   "locked_layers": [
     {
       "path": "./shirt-transparent.png",
+      "role": "product",
       "x": 0.76,
       "y": 0.55,
       "max_width": 0.42,
       "max_height": 0.78,
       "anchor": "center",
       "require_alpha": true
+    },
+    {
+      "path": "./brand-logo.png",
+      "role": "logo",
+      "x": 0.08,
+      "y": 0.08,
+      "max_width": 0.22,
+      "max_height": 0.16,
+      "anchor": "top-left",
+      "require_alpha": true
     }
   ]
 }
 ```
 
-Do not combine `locked_layers` and `reference_images` in v1. A locked layer must use `operation: "generate"`. Scaling is proportional and source-derived, but resampling means it is not a claim of byte-for-byte pixel identity.
+Do not combine `locked_layers` and `reference_images` in the current adapter. A locked layer must use `operation: "generate"`. Scaling is proportional and source-derived, but resampling means it is not a claim of byte-for-byte pixel identity.
 
 ## Exact text layers
 
@@ -127,9 +177,14 @@ Do not combine `locked_layers` and `reference_images` in v1. A locked layer must
 | `background` | `opaque`, `transparent`, or `auto` |
 | `reference_images` | Local image paths used for edit/reference jobs |
 | `locked_layers` | Transparent source images composited after background generation |
+| `locked_layers[].role` | `product`, `logo`, `artwork`, `identity`, or `protected-asset` |
+| `fidelity_mode` | `strict`, `guided`, or `none`; defaults to `strict` when a source asset exists |
 | `preserve` | Non-negotiable details to retain |
 | `avoid` | Additional forbidden visual elements |
 | `brand` | Palette, tone, fonts, references, and avoid list |
+| `brand.auto_palette_from_references` | Defaults to `true` when any reference or locked layer exists |
+| `brand.palette_source_images` | Optional reference-image paths used specifically for automatic palette extraction |
+| `brand.palette_max_colors` | Extract `1..8` colors; defaults to `5` |
 | `professional_designer_mode` | Defaults to `true` |
 | `text_safe_mode` | Generate without critical text and reserve layout space |
 | `text_layers` | Exact copy applied after generation |
