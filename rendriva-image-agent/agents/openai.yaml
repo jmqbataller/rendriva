@@ -1,9 +1,9 @@
 interface:
   display_name: Rendriva
-  short_description: Reference-branded batches with strict fidelity
+  short_description: Pro image batches with identity and brand locks
   default_prompt: Use $rendriva-image-agent to generate a professional batch of separate
-    images without a collage, derive the brand palette from supplied references, and
-    preserve product fabric, texture, and logos exactly.
+    images without a collage, interpret each reference by role, derive the shop brand
+    palette, preserve product and logo identity, and produce conversion-ready exports.
   icon_small: assets/icon.svg
   icon_large: assets/icon.svg
 policy:
