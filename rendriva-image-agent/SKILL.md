@@ -1,6 +1,6 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, campaign batches, draft selection, and any request for multiple individually downloadable images. Apply professional art direction, reference-derived brand palettes, strict product-region truth locks, draft-to-final promotion, cross-image Campaign Vision Lock, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, same-face model variants, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, campaign batches, draft selection, and any request for multiple individually downloadable images. Apply professional art direction, reference-derived brand palettes, Single Model Face Lock, strict product-region truth locks, draft-to-final promotion, cross-image Campaign Vision Lock, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
@@ -68,10 +68,22 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 
 ## Interpret references by role
 
-- Classify every reference as product, logo, identity, palette, style, layout, lighting, background, typography, or general. Prefer explicit user roles; otherwise use deterministic filename inference and record that the role was inferred.
+- Classify every reference as product, model, logo, identity, palette, style, layout, lighting, background, typography, or general. Prefer explicit user roles; otherwise use deterministic filename inference and record that the role was inferred.
 - Let each reference control only its assigned dimension. Never let a mood board or lighting reference alter a protected product or logo.
 - Combine front, back, side, and detail references with the same identity ID into one multi-view product identity pack.
 - When a required view is unavailable, do not invent unseen construction. Request the matching view or fail deterministic validation.
+
+## Keep one model face across variants
+
+- Enable Single Model Face Lock automatically for multi-image `fashion-model` requests and whenever the user asks for one model, one face, the same face, a consistent model, or a model for each variant.
+- If the user supplies one model/face reference and asks to match the uploaded face, treat that upload as the only authoritative face anchor even when its filename is generic. Do not derive brand colors from a model reference unless explicitly requested.
+- Without a supplied model reference, generate and approve the first model image before continuing. Reuse that approved image as the face anchor for every later variant.
+- For native image tools, generate sequentially and attach the same face anchor to every later call. Do not generate variants independently when that would allow different identities.
+- Preserve the same recognizable individual: facial proportions, bone structure, eyes, eyebrows, nose, lips, jawline, ears, skin tone, distinguishing features, and natural age appearance.
+- Allow requested changes to pose, expression, outfit, product variant, camera, lighting, and background only when the person's face identity remains unchanged.
+- Reject face substitution, identity blending, twins/lookalikes, materially changed ethnicity or apparent age, multiple competing faces, or an obscured anchor face.
+- Compare every later output with the anchor. Repair only the output whose identity drifts; never regenerate the passing variants.
+- If the available tool cannot reuse an anchor or perform face-comparison QA, report the consistency lock as unverified rather than claiming that all faces match.
 
 ## Preserve references
 
@@ -145,7 +157,7 @@ Require all non-negotiable gates to pass and an average professional-design scor
 
 - Present each image separately with its index and status.
 - For native generated images, let the host display and retain them; do not reconstruct them merely to make a ZIP.
-- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, `draft-selection-report.json`, optional drafts/platform exports, and `rendriva-output.zip`.
+- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `model-identity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, `draft-selection-report.json`, optional drafts/platform exports, and `rendriva-output.zip`.
 - Report exact failures and blocked capabilities. Never call a run complete beyond the available evidence.
 
 ## Production presets

@@ -6,16 +6,16 @@ Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image
 
 ## Download for ChatGPT Skills
 
-[Download Rendriva ChatGPT Skill v1.4.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.4.0.zip)
+[Download Rendriva ChatGPT Skill v1.5.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.5.0.zip)
 
 This upload-ready ZIP has `SKILL.md` at the archive root.
 
 1. Download the ZIP.
 2. Open the ChatGPT Skills upload flow.
-3. Select `rendriva-chatgpt-skill-v1.4.0.zip`.
+3. Select `rendriva-chatgpt-skill-v1.5.0.zip`.
 4. Review the skill details, then confirm the upload.
 
-Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.4.0.zip.sha256)
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.5.0.zip.sha256)
 
 ## What Rendriva does
 
@@ -27,6 +27,7 @@ Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.4.0.zip.sha25
 - Combines front, back, side, and detail references into a multi-view product identity lock
 - Automatically derives the shop palette from supplied reference images and prioritizes the logo
 - Protects product fabric, weave, texture, stitching, construction, print, color, labels, and exact logo geometry
+- Keeps one authoritative model face across every requested fashion variant, using the uploaded face when supplied
 - Keeps campaign palette, typography, grid, spacing, and logo zones consistent across a batch
 - Compares the complete batch through Campaign Vision Lock and repairs only visual outliers
 - Protects named silhouette, material, fabric, texture, construction, print, logo, label, color, and stitching truth regions
@@ -119,6 +120,7 @@ manifest.json
 quality-report.json
 brand-profile.json
 reference-fidelity-report.json
+model-identity-report.json
 diversity-report.json
 campaign-report.json
 draft-selection-report.json
@@ -148,7 +150,7 @@ Reference jobs default to strict fidelity. Generative editing remains high fidel
 
 ## Validation
 
-The 45-test deterministic suite covers separate ten-image output, provider cardinality, no-collage prompts, partial failures, targeted repair, cross-image Campaign Vision Lock, product-region truth contracts, draft scoring/promotion, reference roles, multi-view identity, automatic palettes, reusable brand profiles, campaign/diversity controls, duplicate detection, strict fidelity, cutout/shadow evidence, responsive typography, marketplace truth controls, unique platform exports, reporting, resume behavior, and ZIP packaging.
+The 54-test deterministic suite covers separate ten-image output, provider cardinality, no-collage prompts, partial failures, targeted repair, uploaded-face and first-approved-model identity anchoring, face-drift repair, cross-image Campaign Vision Lock, product-region truth contracts, draft scoring/promotion, reference roles, multi-view product identity, automatic palettes, reusable brand profiles, campaign/diversity controls, duplicate detection, strict fidelity, cutout/shadow evidence, responsive typography, marketplace truth controls, unique platform exports, reporting, resume behavior, and ZIP packaging.
 
 ```bash
 python -m unittest discover -s rendriva-image-agent/scripts/tests -v
@@ -156,4 +158,4 @@ python -m unittest discover -s rendriva-image-agent/scripts/tests -v
 
 ## Status
 
-Rendriva v1.4 is ready for controlled testing with real image-generation credentials. Live output quality still depends on the selected model, reference quality, prompt constraints, and human review for high-stakes brand or product work.
+Rendriva v1.5 is ready for controlled testing with real image-generation credentials. Live face consistency, photorealism, and product preservation still depend on the selected model, reference quality, prompt constraints, and human review for high-stakes brand or product work.

@@ -61,6 +61,7 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Default reference jobs to strict fidelity, protecting product construction, material, fabric texture, print, labels, color, proportions, and exact logo geometry.
 - Automatically extract a usable brand palette from any supplied reference images. Prioritize a locked logo layer, then combine distinct colors from the remaining references.
 - Detect or accept explicit reference roles and views, then build multi-view product identity packs.
+- For fashion-model batches, approve one face anchor and reuse it sequentially for every later variant; compare each face and repair only identity drift.
 - Apply the derived palette only to unprotected design elements and record its colors plus source fingerprints in the manifest.
 - Load and emit reusable shop brand profiles; lock shared campaign tokens while enforcing distinct batch compositions.
 - Compare the complete campaign batch visually and repair only identified outliers when Campaign Vision Lock is enabled.
@@ -72,11 +73,11 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Reject deterministic near-duplicates and create separate contain-scaled platform exports when requested.
 - Regenerate only an item marked `NEEDS_REPAIR`, once by default.
 - Persist progress after every material step so `--resume` skips completed items.
-- Package successful outputs, brand/fidelity/diversity/campaign/draft-selection reports, and optional draft/platform exports into `rendriva-output.zip`.
+- Package successful outputs, brand/fidelity/model-identity/diversity/campaign/draft-selection reports, and optional draft/platform exports into `rendriva-output.zip`.
 
 ## Native ChatGPT behavior
 
-When the host exposes a native image-generation tool, call it separately for each planned output. A batch of ten means ten separate native results, not one prompt asking for a ten-panel sheet. Generated images may be retained by the host automatically; do not download or reconstruct them solely to create an archive.
+When the host exposes a native image-generation tool, call it separately for each planned output. A batch of ten means ten separate native results, not one prompt asking for a ten-panel sheet. For same-model batches, approve the first face, then attach that same anchor to every later call instead of generating all faces independently. Generated images may be retained by the host automatically; do not download or reconstruct them solely to create an archive.
 
 ## Evidence states
 
@@ -86,3 +87,5 @@ When the host exposes a native image-generation tool, call it separately for eac
 - `BLOCKED`: policy, missing tool, missing key, or unavailable capability prevented generation.
 
 Strict generative reference jobs cannot receive `PASS` when the comparison judge is disabled. Source-derived `locked_layers` provide the literal-preservation path; ordinary reference edits remain high-fidelity generation and must not be described as pixel-identical.
+
+The explicit `--mock` provider validates orchestration only. Its reports use `evidence_mode: synthetic-mock`; campaign and face comparisons may record synthetic pass logic but must keep `verified: false`. Placeholder mock pixels are not evidence of real face consistency, product fidelity, or commercial image quality.
