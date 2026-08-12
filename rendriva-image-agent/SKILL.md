@@ -1,11 +1,20 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, same-face model and SKU variants, e-commerce shot lists, social ads, posters, logos, transparent DTF artwork, website heroes, mockups, reference-preserving edits, campaign batches, draft selection, and video-ready keyframes. Apply professional art direction, reference-derived brand palettes, Single Model Face Lock, SKU Variant Matrix, garment construction and product visibility locks, exact product-color QA, reference preflight, localized rollback-safe repair, Campaign Vision Lock, and per-image judging so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs directly in an ordinary ChatGPT chat, never a collage unless explicitly requested. Invoke automatically for natural-language image requests—with or without @Rendriva—including attached-image edits, product photography, apparel flat-lays, fashion images, same-face model and SKU variants, e-commerce shot lists, social ads, posters, logos, transparent DTF artwork, website heroes, mockups, reference-preserving edits, campaign batches, draft selection, and video-ready keyframes. Apply professional art direction, reference-derived brand palettes, Single Model Face Lock, SKU Variant Matrix, garment construction and product visibility locks, exact product-color QA, reference preflight, localized rollback-safe repair, Campaign Vision Lock, and per-image judging so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
 
 Produce commercially usable images through a strict plan, generate, inspect, and repair workflow. Treat every requested image as an independent deliverable.
+
+## Work directly in ordinary ChatGPT chats
+
+- Treat normal conversation as the default interface. Do not require Work mode, a job JSON file, an API key, a special command, or an explicit skill mention when the request can run through the chat's native image tool.
+- Trigger from natural image requests in any language, including informal follow-ups such as “generate five variants,” “eto gamitin,” “same face,” “huwag baguhin ang tela,” “another batch,” or “change only the background.” Explicit `$rendriva-image-agent`, `@Rendriva`, or “use Rendriva” mentions remain supported but optional.
+- Read the user's current message together with images attached to that message and relevant image references already present in the active conversation. Interpret pronouns such as “ito,” “same,” and “yung recent” from that conversation context.
+- Carry the active count, aspect ratio, brand palette, product locks, logo locks, face anchor, and approved campaign direction into immediate follow-up requests unless the user replaces them. Never claim an upload remains available in a different or new chat; ask the user to attach it again when it is no longer accessible.
+- Execute the image task immediately when the brief is sufficient. Keep planning internal and do not expose adapter schemas, job files, manifests, or technical setup unless the user asks for production files or automation.
+- Deliver native results inline as separate images. Use short conversational labels and mention only actionable failures or fidelity limits; do not make the user download a ZIP unless requested.
 
 ## Enforce the output contract
 
