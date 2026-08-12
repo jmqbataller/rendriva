@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 
 REFERENCE_ROLES = {
     "product",
+    "model",
     "logo",
     "style",
     "layout",
@@ -98,7 +99,7 @@ def infer_reference_role(path: str) -> str:
         ("lighting", ("lighting", "light-reference", "shadow")),
         ("background", ("background", "backdrop", "scene")),
         ("style", ("style", "mood", "inspiration", "inspo", "editorial")),
-        ("identity", ("identity", "character", "face", "person")),
+        ("model", ("model", "character", "face", "person", "woman", "man")),
         ("product", ("product", "shirt", "garment", "dress", "shoe", "bottle", "bag", "packaging", "item", "front", "back", "side", "detail")),
     )
     for role, tokens in rules:
@@ -153,7 +154,7 @@ def normalize_reference_assets(
         view = str(entry.get("view") or infer_reference_view(path))
         if view not in REFERENCE_VIEWS:
             raise ValueError(f"reference_assets[{index}].view must be one of: {', '.join(sorted(REFERENCE_VIEWS))}.")
-        identity_id = str(entry.get("identity_id") or (infer_identity_id(path) if role in {"product", "identity"} else ""))
+        identity_id = str(entry.get("identity_id") or (infer_identity_id(path) if role in {"product", "identity", "model"} else ""))
         preserve = entry.get("preserve", [])
         if not isinstance(preserve, list) or any(not isinstance(item, str) or not item.strip() for item in preserve):
             raise ValueError(f"reference_assets[{index}].preserve must be a list of non-empty strings.")
@@ -161,6 +162,12 @@ def normalize_reference_assets(
         if key in seen:
             continue
         seen.add(key)
+        normalized_preserve = [item.strip() for item in preserve]
+        if role == "model" and not normalized_preserve:
+            normalized_preserve = [
+                "same individual face identity",
+                "facial proportions, bone structure, eye shape, nose, lips, jawline, skin tone, and distinguishing features",
+            ]
         normalized.append(
             {
                 "path": path,
@@ -168,9 +175,9 @@ def normalize_reference_assets(
                 "role_source": "explicit" if explicit_role else "filename-inference",
                 "view": view,
                 "identity_id": identity_id,
-                "use_for_palette": bool(entry.get("use_for_palette", role not in {"layout", "lighting", "typography"})),
+                "use_for_palette": bool(entry.get("use_for_palette", role not in {"layout", "lighting", "typography", "model"})),
                 "priority": int(entry.get("priority", 100 if role == "logo" else 50)),
-                "preserve": [item.strip() for item in preserve],
+                "preserve": normalized_preserve,
                 "sha256": _sha256(path),
             }
         )
@@ -433,6 +440,89 @@ def normalize_draft_to_final(value: Any, final_count: int) -> dict[str, Any]:
     }
 
 
+def normalize_model_identity_lock(
+    value: Any,
+    prompt: str,
+    preset: str,
+    count: int,
+    reference_assets: list[dict[str, Any]],
+    base_dir: Path,
+) -> dict[str, Any]:
+    request_trigger = bool(
+        re.search(
+            r"\b(same|single|one|consistent)\s+(model|face|person|woman|man)\b|"
+            r"\b(model|face)\s+(identity|lock|consistency)\b|"
+            r"\b(model|face)\s+for\s+(each|every)\s+variant\b|"
+            r"\bsame\b.{0,30}\b(face|mukha)\b|\b(iisang|pareho|parehong)\b.{0,20}\b(face|mukha)\b",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+    )
+    uploaded_face_trigger = bool(
+        re.search(
+            r"\b(same|exact|pareho|parehong)\b.{0,35}\b(face|mukha)\b.{0,60}\b(upload|uploaded|inupload|reference|photo|image|sinend|provided)\b|"
+            r"\b(upload|uploaded|inupload|reference|photo|image|sinend|provided)\b.{0,60}\b(same|exact|pareho)\b.{0,35}\b(face|mukha)\b",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+    )
+    automatic_default = (count > 1 and preset == "fashion-model") or request_trigger
+    explicit_config = value is not None
+    if value is None:
+        value = {"enabled": automatic_default}
+    if isinstance(value, bool):
+        value = {"enabled": value}
+    if not isinstance(value, dict):
+        raise ValueError("model_identity_lock must be a boolean or object.")
+    enabled = bool(value.get("enabled", True))
+    model_assets = [asset for asset in reference_assets if asset["role"] == "model"]
+    source_value = value.get("source_path", value.get("source"))
+    if source_value is not None:
+        if not isinstance(source_value, str) or not source_value.strip():
+            raise ValueError("model_identity_lock.source_path must be a non-empty string.")
+        source_path = _resolved_file(source_value, base_dir, "Model identity source")
+    elif model_assets:
+        unique_sources = list(dict.fromkeys(asset["path"] for asset in model_assets))
+        if len(unique_sources) > 1:
+            raise ValueError("Single Model Face Lock accepts only one authoritative model reference.")
+        source_path = unique_sources[0]
+    elif enabled and uploaded_face_trigger and len(reference_assets) == 1:
+        source_path = reference_assets[0]["path"]
+    elif enabled and uploaded_face_trigger and len(reference_assets) > 1:
+        raise ValueError("The request requires the uploaded face, but multiple references were supplied. Mark exactly one reference with role='model' or set model_identity_lock.source_path.")
+    else:
+        source_path = None
+    if enabled and source_path and any(asset["path"] != source_path for asset in model_assets):
+        raise ValueError("Single Model Face Lock cannot use multiple different model references in one batch.")
+    min_confidence = float(value.get("min_confidence", 0.80))
+    if not 0 <= min_confidence <= 1:
+        raise ValueError("model_identity_lock.min_confidence must be from 0 through 1.")
+    preserve = value.get(
+        "preserve",
+        [
+            "same individual face identity",
+            "facial proportions and bone structure",
+            "eye shape and spacing, eyebrows, nose, lips, jawline, ears, and skin tone",
+            "distinctive facial features and natural age appearance",
+        ],
+    )
+    if not isinstance(preserve, list) or any(not isinstance(item, str) or not item.strip() for item in preserve):
+        raise ValueError("model_identity_lock.preserve must be a list of non-empty strings.")
+    trigger = "explicit-config" if explicit_config else "uploaded-face-request" if uploaded_face_trigger else "fashion-model-batch" if preset == "fashion-model" and count > 1 else "request-language" if request_trigger else "disabled"
+    return {
+        "enabled": enabled,
+        "mode": "single-face",
+        "trigger": trigger,
+        "source_path": source_path,
+        "source_sha256": _sha256(source_path) if source_path else None,
+        "anchor_strategy": "supplied-reference" if source_path else "first-approved-output",
+        "min_confidence": min_confidence,
+        "allow_pose_variation": bool(value.get("allow_pose_variation", True)),
+        "allow_expression_variation": bool(value.get("allow_expression_variation", True)),
+        "preserve": [item.strip() for item in preserve],
+    }
+
+
 def normalize_platform_exports(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -547,15 +637,18 @@ def create_platform_exports(job_dir: Path, manifest: dict[str, Any]) -> list[dic
 
 def reference_fidelity_report(manifest: dict[str, Any]) -> dict[str, Any]:
     spec = manifest["spec"]
+    synthetic = manifest.get("evidence_mode") == "synthetic-mock"
     outputs = []
     for item in manifest["outputs"]:
         composite = item.get("locked_layer_composite") or {}
+        raw_reference_result = ((item.get("quality") or {}).get("vision") or {}).get("reference_preservation")
         outputs.append(
             {
                 "index": item["index"],
                 "file": item["file"],
                 "status": item["status"],
-                "reference_preservation": ((item.get("quality") or {}).get("vision") or {}).get("reference_preservation"),
+                "reference_preservation": None if synthetic else raw_reference_result,
+                "synthetic_reference_result": raw_reference_result if synthetic else None,
                 "literal_source_layers": composite.get("layers", []),
                 "region_fidelity": ((item.get("quality") or {}).get("vision") or {}).get("region_fidelity", []),
                 "evidence_note": (item.get("quality") or {}).get("evidence_note"),
@@ -563,6 +656,9 @@ def reference_fidelity_report(manifest: dict[str, Any]) -> dict[str, Any]:
         )
     return {
         "job_id": manifest["job_id"],
+        "evidence_mode": manifest.get("evidence_mode", "vision-provider"),
+        "verified": not synthetic and all(item["status"] != "PASS" or item["reference_preservation"] is not False for item in outputs),
+        "verification_note": "Mock placeholder pixels do not verify real reference fidelity." if synthetic else "Reference results come from the configured vision provider and declared literal-source evidence.",
         "fidelity_mode": spec.get("fidelity_mode"),
         "reference_assets": spec.get("reference_assets", []),
         "identity_packs": spec.get("identity_packs", []),

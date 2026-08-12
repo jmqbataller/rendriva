@@ -73,6 +73,8 @@ class ShortBatchProvider(rendriva.MockProvider):
 
 
 class CampaignOutlierProvider(rendriva.MockProvider):
+    synthetic_evidence = False
+
     def __init__(self):
         self.campaign_calls = 0
 
@@ -103,6 +105,42 @@ class DraftRecordingProvider(rendriva.MockProvider):
     def promote(self, spec, prompt, draft_path, n=1):
         self.promotions.append(draft_path.name)
         return super().promote(spec, prompt, draft_path, n=n)
+
+
+class IdentityRecordingProvider(rendriva.MockProvider):
+    synthetic_evidence = False
+
+    def __init__(self):
+        self.creates = []
+        self.identity_creates = []
+
+    def create(self, spec, prompt, n=1):
+        self.creates.append({"n": n, "quality": spec["quality"]})
+        return super().create(spec, prompt, n=n)
+
+    def create_with_identity(self, spec, prompt, identity_path, *, draft_path=None, n=1):
+        self.identity_creates.append(
+            {"identity": identity_path.name, "draft": draft_path.name if draft_path else None, "n": n, "prompt": prompt}
+        )
+        return super().create_with_identity(spec, prompt, identity_path, draft_path=draft_path, n=n)
+
+
+class FaceMismatchProvider(IdentityRecordingProvider):
+    def __init__(self):
+        super().__init__()
+        self.failed_face_once = False
+
+    def judge(self, spec, image_path, prompt):
+        result = super().judge(spec, image_path, prompt)
+        if image_path.name == "image-02.png" and not self.failed_face_once:
+            self.failed_face_once = True
+            result["gates_pass"] = False
+            result["model_identity_match"] = False
+            result["model_identity_confidence"] = 0.22
+            result["model_identity_observations"] = "The face is a different individual."
+            result["defects"] = ["The model face does not match the identity anchor."]
+            result["repair_prompt"] = "Restore the exact anchored face identity while retaining this variant's outfit and pose."
+        return result
 
 
 class RendrivaTests(unittest.TestCase):
@@ -580,9 +618,18 @@ class RendrivaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             job_dir, _ = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
             report = json.loads((job_dir / "campaign-report.json").read_text(encoding="utf-8"))
-        self.assertTrue(report["batch_visual_consistency_verified"])
-        self.assertTrue(report["batch_visual_consistency_passed"])
-        self.assertEqual(report["evidence_scope"], "cross-image-vision-comparison")
+            fidelity = json.loads((job_dir / "reference-fidelity-report.json").read_text(encoding="utf-8"))
+            quality = json.loads((job_dir / "quality-report.json").read_text(encoding="utf-8"))
+        self.assertFalse(report["batch_visual_consistency_verified"])
+        self.assertFalse(report["batch_visual_consistency_passed"])
+        self.assertTrue(report["synthetic_comparison_passed"])
+        self.assertEqual(report["evidence_scope"], "synthetic-mock-comparison")
+        self.assertIn("placeholder outputs", report["verification_note"])
+        self.assertFalse(quality["delivery_ready"])
+        self.assertEqual(quality["outputs"][0]["visual_verification_status"], "SYNTHETIC_TEST_ONLY")
+        self.assertFalse(fidelity["verified"])
+        self.assertIsNone(fidelity["outputs"][0]["reference_preservation"])
+        self.assertTrue(fidelity["outputs"][0]["synthetic_reference_result"])
 
     def test_campaign_vision_lock_repairs_only_the_outlier(self):
         provider = CampaignOutlierProvider()
@@ -675,6 +722,109 @@ class RendrivaTests(unittest.TestCase):
             rendriva.normalize_job(base_job(count=2, draft_to_final={"candidate_count": 4, "selection_mode": "manual", "selection": [1]}))
         spec = rendriva.normalize_job(base_job(count=2, draft_to_final={"candidate_count": 4, "selection_mode": "manual", "selection": [4, 2]}))
         self.assertEqual(spec["draft_to_final"]["selection"], [4, 2])
+
+    def test_single_model_face_lock_auto_triggers_for_fashion_batches_and_request_language(self):
+        fashion = rendriva.normalize_job(base_job(count=3, preset="fashion-model"))
+        requested = rendriva.normalize_job(base_job(count=2, prompt="Generate a model for each variant using one face only"))
+        disabled = rendriva.normalize_job(base_job(count=3, preset="fashion-model", model_identity_lock=False))
+        self.assertTrue(fashion["model_identity_lock"]["enabled"])
+        self.assertEqual(fashion["model_identity_lock"]["anchor_strategy"], "first-approved-output")
+        self.assertTrue(requested["model_identity_lock"]["enabled"])
+        self.assertFalse(disabled["model_identity_lock"]["enabled"])
+        prompt = rendriva.compile_prompt(fashion, rendriva.build_plan(fashion)[0])
+        self.assertIn("SINGLE MODEL FACE LOCK", prompt)
+        self.assertIn("authoritative identity anchor", prompt)
+
+    def test_first_approved_model_becomes_anchor_for_every_later_variant(self):
+        provider = IdentityRecordingProvider()
+        spec = rendriva.normalize_job(base_job(count=3, preset="fashion-model"))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), provider)
+            report = json.loads((job_dir / "model-identity-report.json").read_text(encoding="utf-8"))
+            with zipfile.ZipFile(job_dir / "rendriva-output.zip") as archive:
+                names = set(archive.namelist())
+        self.assertEqual(provider.creates[0]["n"], 1)
+        self.assertEqual([call["identity"] for call in provider.identity_creates], ["image-01.png", "image-01.png"])
+        self.assertEqual(manifest["model_identity_lock"]["anchor_output_index"], 1)
+        self.assertEqual([item.get("model_identity_anchor_file") for item in manifest["outputs"][1:]], ["image-01.png", "image-01.png"])
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["status"], "PASS")
+        self.assertIn("model-identity-report.json", names)
+
+    def test_supplied_model_reference_is_the_only_face_anchor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model = root / "shop-model-face.png"
+            rendriva.Image.new("RGB", (64, 64), "#B08070").save(model)
+            spec = rendriva.normalize_job(
+                base_job(count=2, preset="fashion-model", operation="edit", reference_assets=[{"path": str(model), "role": "model"}])
+            )
+            provider = IdentityRecordingProvider()
+            _, manifest = rendriva.execute(spec, root / "runs", provider)
+        self.assertEqual(spec["model_identity_lock"]["source_path"], str(model))
+        self.assertFalse(spec["brand"]["palette_sources"])
+        self.assertEqual([call["identity"] for call in provider.identity_creates], [model.name, model.name])
+        self.assertEqual(manifest["model_identity_lock"]["anchor_strategy"], "supplied-reference")
+
+    def test_uploaded_face_request_promotes_a_generic_upload_to_authoritative_model_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            uploaded = root / "upload-92831.png"
+            rendriva.Image.new("RGB", (64, 64), "#A87868").save(uploaded)
+            spec = rendriva.normalize_job(
+                base_job(
+                    count=3,
+                    prompt="Pareho ang mukha sa uploaded image for every clothing variant",
+                    reference_images=[str(uploaded)],
+                )
+            )
+            provider = IdentityRecordingProvider()
+            _, manifest = rendriva.execute(spec, root / "runs", provider)
+        self.assertEqual(spec["reference_assets"][0]["role"], "model")
+        self.assertEqual(spec["reference_assets"][0]["role_source"], "request-inference")
+        self.assertFalse(spec["reference_assets"][0]["use_for_palette"])
+        self.assertEqual(spec["model_identity_lock"]["source_path"], str(uploaded))
+        self.assertEqual(spec["model_identity_lock"]["anchor_strategy"], "supplied-reference")
+        self.assertEqual([call["identity"] for call in provider.identity_creates], [uploaded.name, uploaded.name, uploaded.name])
+        self.assertTrue(manifest["model_identity_report"]["verified"])
+
+    def test_uploaded_face_anchor_is_honored_even_for_one_model_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            uploaded = Path(temporary) / "upload.png"
+            rendriva.Image.new("RGB", (64, 64), "#A87868").save(uploaded)
+            spec = rendriva.normalize_job(base_job(count=1, prompt="Same face as the uploaded image", reference_images=[str(uploaded)]))
+        self.assertTrue(spec["model_identity_lock"]["enabled"])
+        self.assertEqual(spec["model_identity_lock"]["source_path"], str(uploaded))
+        self.assertEqual(spec["reference_assets"][0]["role"], "model")
+
+    def test_face_identity_mismatch_repairs_only_the_failed_variant(self):
+        provider = FaceMismatchProvider()
+        spec = rendriva.normalize_job(base_job(count=3, preset="fashion-model", max_repair_attempts=1))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), provider)
+        self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "PASS", "PASS"])
+        self.assertEqual(manifest["outputs"][0]["repair_attempts"], 0)
+        self.assertEqual(manifest["outputs"][1]["repair_attempts"], 1)
+        self.assertEqual(manifest["outputs"][2]["repair_attempts"], 0)
+        self.assertIn("exact anchored face identity", manifest["outputs"][1]["repair_history"][0]["prompt"])
+
+    def test_face_lock_with_drafts_uses_one_draft_anchor_for_candidates_and_finals(self):
+        provider = IdentityRecordingProvider()
+        spec = rendriva.normalize_job(base_job(count=2, preset="fashion-model", draft_to_final={"candidate_count": 4, "draft_quality": "low"}))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), provider)
+        self.assertEqual(provider.identity_creates[0]["identity"], "draft-01.png")
+        self.assertEqual(provider.identity_creates[0]["n"], 3)
+        self.assertEqual([call["identity"] for call in provider.identity_creates[1:]], ["draft-01.png", "draft-01.png"])
+        self.assertEqual(manifest["model_identity_lock"]["anchor_strategy"], "first-approved-draft")
+        self.assertTrue(manifest["model_identity_report"]["verified"])
+
+    def test_face_lock_cannot_claim_verification_without_vision_judge(self):
+        spec = rendriva.normalize_job(base_job(count=2, preset="fashion-model", max_repair_attempts=0))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider(), use_vision_judge=False)
+        self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "FAILED"])
+        self.assertFalse(manifest["model_identity_report"]["verified"])
 
 
 if __name__ == "__main__":

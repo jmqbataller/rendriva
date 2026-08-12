@@ -1,6 +1,6 @@
 # Rendriva advanced features
 
-Rendriva 1.4 adds verified cross-image campaign review, product-region truth contracts, and draft-to-final promotion while preserving the original one-to-ten separate-output contract.
+Rendriva 1.5 adds Single Model Face Lock while retaining verified cross-image campaign review, product-region truth contracts, draft-to-final promotion, and the original one-to-ten separate-output contract.
 
 ## Reference Intelligence and multi-view identity
 
@@ -19,7 +19,7 @@ Use `reference_assets` when each source has a distinct purpose. A filename-based
 }
 ```
 
-Supported roles are `product`, `logo`, `style`, `layout`, `lighting`, `background`, `typography`, `palette`, `identity`, and `general`. Product and identity references with the same `identity_id` form one identity pack. Required missing views fail validation instead of inviting invented construction.
+Supported roles are `product`, `model`, `logo`, `style`, `layout`, `lighting`, `background`, `typography`, `palette`, `identity`, and `general`. Product and identity references with the same `identity_id` form one product identity pack. A `model` reference controls face identity only and does not contribute to the automatic brand palette by default. Required missing product views fail validation instead of inviting invented construction.
 
 ## Batch diversity and campaign consistency
 
@@ -62,6 +62,41 @@ For campaigns with at least two passing outputs, cross-image vision review is en
 ```
 
 `campaign-report.json` claims cross-image verification only when the batch judge actually ran. Disabling the vision judge leaves the report explicitly unverified.
+
+## Single Model Face Lock
+
+Multi-image `fashion-model` jobs enable this lock automatically. Request language such as “same model,” “one face,” “consistent model,” or “model for each variant” also enables it. Set `model_identity_lock` to `false` only when different people are intentional.
+
+```json
+{
+  "prompt": "Generate one model for each clothing variant using the same face",
+  "count": 4,
+  "preset": "fashion-model",
+  "model_identity_lock": {
+    "enabled": true,
+    "min_confidence": 0.8,
+    "allow_pose_variation": true,
+    "allow_expression_variation": true
+  }
+}
+```
+
+Without a supplied face, the first output must pass QA before it becomes the anchor for later variants. When the request explicitly says to match one uploaded face, a single generic upload is promoted to the authoritative `model` role automatically and is excluded from palette extraction. With multiple uploaded references, mark exactly one as `model` or set `model_identity_lock.source_path`:
+
+```json
+{
+  "operation": "edit",
+  "reference_assets": [
+    {"path": "./shop-model-face.png", "role": "model", "use_for_palette": false},
+    {"path": "./shirt-front.png", "role": "product", "view": "front"}
+  ],
+  "model_identity_lock": {"enabled": true, "min_confidence": 0.85}
+}
+```
+
+Each later generation receives the same anchor. Per-image QA compares facial identity while allowing requested changes to outfit, pose, expression, camera, lighting, and background. A different person, lookalike, blended identity, or materially changed facial structure fails the gate and triggers repair only for that output. `model-identity-report.json` records the anchor fingerprint, comparison confidence, observations, and verification status. If vision comparison is disabled, later outputs cannot claim verified face consistency.
+
+Runs made with the explicit mock provider exercise the workflow but keep `verified: false` and label their evidence synthetic; placeholder mock outputs do not establish real face fidelity.
 
 ## Product Region Truth Map
 
@@ -219,6 +254,7 @@ The ZIP can contain:
 - `quality-report.json`;
 - `brand-profile.json`;
 - `reference-fidelity-report.json`;
+- `model-identity-report.json`;
 - `diversity-report.json`;
 - `campaign-report.json`;
 - `draft-selection-report.json`;

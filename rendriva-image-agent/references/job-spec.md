@@ -164,7 +164,7 @@ Do not combine `locked_layers` and `reference_images` in the current adapter. A 
 
 ## Advanced production controls
 
-Rendriva 1.4 supports automatic reference roles, multi-view identity packs, verified Campaign Vision Lock, product-region truth maps, draft-to-final promotion, batch diversity, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
+Rendriva 1.5 supports Single Model Face Lock, automatic reference roles, multi-view product identity packs, verified Campaign Vision Lock, product-region truth maps, draft-to-final promotion, batch diversity, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
 
 ## Supported fields
 
@@ -181,7 +181,7 @@ Rendriva 1.4 supports automatic reference roles, multi-view identity packs, veri
 | `format` | `png`, `jpeg`, or `webp` |
 | `background` | `opaque`, `transparent`, or `auto` |
 | `reference_images` | Local image paths used for edit/reference jobs |
-| `reference_assets` | Role-aware local sources with `path`, `role`, `view`, `identity_id`, and palette controls |
+| `reference_assets` | Role-aware local sources with `path`, `role`, `view`, `identity_id`, and palette controls; `model` is the face-only role |
 | `product_identity.required_views` | Views that must exist in the identity pack before generation |
 | `locked_layers` | Transparent source images composited after background generation |
 | `locked_layers[].role` | `product`, `logo`, `artwork`, `identity`, or `protected-asset` |
@@ -203,6 +203,9 @@ Rendriva 1.4 supports automatic reference roles, multi-view identity packs, veri
 | `diversity` | Near-duplicate threshold and composition/camera/background variation axes |
 | `product_truth_map` | Named product/logo preservation regions using normalized bounds and optional same-size masks |
 | `draft_to_final` | Low-quality candidate generation, automatic/manual selection, and selected-draft promotion |
+| `model_identity_lock` | Same-person face anchor for every model variant; automatic for multi-image `fashion-model` jobs |
+| `model_identity_lock.source_path` | Optional single authoritative face reference; otherwise the first approved model becomes the anchor |
+| `model_identity_lock.min_confidence` | Face-comparison threshold from `0..1`; defaults to `0.80` |
 | `platform_exports` | Separate contain-scaled Shopee, Instagram, Facebook, website, or TikTok PNG exports |
 | `marketplace` | Conversion goal plus exact supplied price, discount, CTA, bundle count, and claims |
 | `max_repair_attempts` | Defaults to `1`; capped at `3` |

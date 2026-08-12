@@ -1,10 +1,11 @@
 interface:
   display_name: Rendriva
-  short_description: Verified campaigns with product truth locks
+  short_description: Same-face campaigns with product truth locks
   default_prompt: Use $rendriva-image-agent to generate a professional batch of separate
     images without a collage, interpret each reference by role, derive the shop brand
-    palette, preserve product and logo truth regions, promote selected drafts, verify
-    the full campaign visually, and produce conversion-ready exports.
+    palette, keep one model face across every requested variant, preserve product
+    and logo truth regions, promote selected drafts, verify the full campaign visually,
+    and produce conversion-ready exports.
   icon_small: assets/icon.svg
   icon_large: assets/icon.svg
 policy:

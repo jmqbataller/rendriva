@@ -47,6 +47,7 @@ from rendriva_advanced import (  # noqa: E402
     normalize_draft_to_final,
     normalize_diversity,
     normalize_marketplace,
+    normalize_model_identity_lock,
     normalize_platform_exports,
     normalize_product_truth_map,
     normalize_reference_assets,
@@ -55,7 +56,7 @@ from rendriva_advanced import (  # noqa: E402
 )
 
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -71,6 +72,12 @@ STRICT_ASSET_LOCKS = [
     "source material, fabric weave, texture, finish, stitching, folds, print, and color",
     "source logo geometry, lettering, spacing, colors, placement, and aspect ratio",
     "source labels, marks, and identifiers without redraw, recolor, retexture, reshaping, or invented detail",
+]
+
+MODEL_IDENTITY_LOCKS = [
+    "same individual face identity across every model output",
+    "facial proportions, bone structure, eye shape and spacing, eyebrows, nose, lips, jawline, ears, skin tone, and distinguishing features",
+    "natural age appearance without face substitution, identity blending, or a lookalike replacement",
 ]
 
 PRESETS: dict[str, dict[str, Any]] = {
@@ -462,6 +469,18 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if operation in {"edit", "variation"} and not references:
         raise ValidationError(f"operation='{operation}' requires at least one reference image.")
 
+    try:
+        model_identity_lock = normalize_model_identity_lock(raw.get("model_identity_lock"), prompt.strip(), preset, count, reference_assets, base_dir)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    if model_identity_lock["enabled"] and model_identity_lock.get("source_path"):
+        for asset in reference_assets:
+            if asset["path"] == model_identity_lock["source_path"] and asset["role"] == "general":
+                asset["role"] = "model"
+                asset["role_source"] = "request-inference"
+                asset["use_for_palette"] = False
+                asset["preserve"] = list(dict.fromkeys(asset["preserve"] + MODEL_IDENTITY_LOCKS))
+
     identity_config = raw.get("product_identity", {})
     if identity_config is None:
         identity_config = {}
@@ -478,7 +497,9 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if missing_views:
         raise ValidationError(f"The product identity pack is missing required source views: {', '.join(missing_views)}.")
 
-    protected_reference = any(asset["role"] in {"product", "logo", "identity", "general"} for asset in reference_assets)
+    protected_product_reference = any(asset["role"] in {"product", "logo", "identity", "general"} for asset in reference_assets)
+    protected_model_reference = any(asset["role"] == "model" for asset in reference_assets)
+    protected_reference = protected_product_reference or protected_model_reference
     default_fidelity = "strict" if protected_reference or locked_layers else "guided" if references else "none"
     fidelity_mode = str(raw.get("fidelity_mode", default_fidelity))
     if fidelity_mode not in VALID_FIDELITY_MODES:
@@ -487,8 +508,10 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         raise ValidationError("fidelity_mode requires reference assets or locked_layers.")
     preserve = as_string_list(raw.get("preserve"), "preserve")
     preserve += [lock for asset in reference_assets for lock in asset["preserve"]]
-    if fidelity_mode == "strict" and (protected_reference or locked_layers):
+    if fidelity_mode == "strict" and (protected_product_reference or locked_layers):
         preserve = list(dict.fromkeys(preserve + STRICT_ASSET_LOCKS))
+    if fidelity_mode == "strict" and protected_model_reference:
+        preserve = list(dict.fromkeys(preserve + MODEL_IDENTITY_LOCKS))
 
     try:
         profile, profile_evidence = load_brand_profile(raw.get("brand_profile"), base_dir)
@@ -560,11 +583,13 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         "format": output_format, "background": background, "reference_images": references,
         "reference_assets": reference_assets, "identity_packs": identity_packs,
         "locked_layers": locked_layers, "protected_reference": protected_reference,
+        "protected_product_reference": protected_product_reference,
+        "protected_model_reference": protected_model_reference,
         "fidelity_mode": fidelity_mode, "preserve": preserve,
         "avoid": as_string_list(raw.get("avoid"), "avoid"), "brand": brand,
         "campaign": campaign, "diversity": diversity, "platform_exports": platform_exports,
         "marketplace": marketplace, "product_truth_map": product_truth_map,
-        "draft_to_final": draft_to_final,
+        "draft_to_final": draft_to_final, "model_identity_lock": model_identity_lock,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
         "text_safe_mode": bool(raw.get("text_safe_mode", bool(text_layers))), "text_layers": text_layers,
         "max_repair_attempts": max_repairs, "min_professional_score": float(threshold),
@@ -686,7 +711,7 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             "Do not claim pixel-identical preservation."
         )
     elif spec["fidelity_mode"] == "strict":
-        if spec["protected_reference"] or spec["locked_layers"]:
+        if spec["protected_product_reference"] or spec["locked_layers"]:
             strategy = "literal source compositing" if spec["locked_layers"] else "strict reference editing with mandatory comparison QA"
             fidelity_rule = (
                 f"Use {strategy}. The supplied product, garment, artwork, or logo is authoritative and protected. "
@@ -694,6 +719,11 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
                 "Keep fabric weave, fibers, stitching, seams, folds, finish, print, color, silhouette, proportions, labels, and product construction unchanged. "
                 "Keep every logo's exact symbol, lettering, geometry, spacing, color, aspect ratio, and placement unchanged; never approximate it with generated text. "
                 "If the requested transformation conflicts with a protected asset, preserve the asset and modify only the background, staging, lighting environment, layout, or unprotected region."
+            )
+        elif spec["protected_model_reference"]:
+            fidelity_rule = (
+                "Use strict face-identity reference editing. Preserve the same individual person's facial proportions, bone structure, eyes, eyebrows, nose, lips, jawline, ears, skin tone, distinguishing features, and natural age appearance. "
+                "Do not copy the reference clothing or background unless requested; the model source controls facial identity only."
             )
         else:
             fidelity_rule = "Apply strict role scoping: each non-product reference controls only its declared style, layout, lighting, background, typography, or palette dimension. No product or logo lock is implied."
@@ -704,7 +734,7 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             for asset in spec["reference_assets"]
         ]
         reference_intelligence = (
-            "Use each reference only for its assigned role. Product/identity references control protected identity; logo references control exact brand marks; "
+            "Use each reference only for its assigned role. Product/identity references control protected product identity; model references control face identity only; logo references control exact brand marks; "
             "style/layout/lighting/background/typography references guide only that named dimension. Never let a style reference overwrite product construction or logo geometry.\n"
             + "\n".join(role_lines)
         )
@@ -739,6 +769,20 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             "Treat every named region as an independent preservation contract. Never compensate for a failed logo, print, fabric, texture, stitching, label, color, construction, silhouette, material, or identity region with a visually attractive redesign.\n"
             + truth_rule
         )
+    model_identity = spec["model_identity_lock"]
+    model_identity_rule = "Single Model Face Lock is disabled."
+    if model_identity["enabled"]:
+        if model_identity.get("source_path"):
+            model_identity_rule = (
+                f"The attached model identity anchor {Path(model_identity['source_path']).name} is authoritative. Use the same individual person and face in this output. "
+                f"Preserve: {_join(model_identity['preserve'])}. Do not substitute a lookalike, blend identities, change ethnicity or apparent age, or generate a different model. "
+                "Pose, expression, outfit, camera, lighting, and scene may vary only when the person's recognizable facial identity remains unchanged."
+            )
+        else:
+            model_identity_rule = (
+                "Establish exactly one clear, natural, professionally photographed model face for this first approved output. "
+                "This person will become the authoritative identity anchor for every later variant, so avoid an obscured, profile-only, cropped, duplicated, or ambiguous face."
+            )
     if item.get("batch_variations"):
         scene = f"Create {spec['count']} independent professional variations across the provider response. Every returned item must remain one standalone image."
         if spec["diversity"]["enabled"]:
@@ -794,6 +838,9 @@ REFERENCE INTELLIGENCE:
 
 MULTI-VIEW PRODUCT IDENTITY:
 {identity_intelligence}
+
+SINGLE MODEL FACE LOCK:
+{model_identity_rule}
 
 PRODUCT REGION TRUTH MAP:
 {truth_rule}
@@ -954,18 +1001,49 @@ class OpenAIProvider:
             raise ProviderError(f"Requested {n} promoted images but the API returned {len(images)}.")
         return images
 
+    def create_with_identity(
+        self,
+        spec: dict[str, Any],
+        prompt: str,
+        identity_path: Path,
+        *,
+        draft_path: Path | None = None,
+        n: int = 1,
+    ) -> list[bytes]:
+        fields = {
+            "model": spec["image_model"],
+            "prompt": prompt,
+            "n": str(n),
+            "quality": spec["quality"],
+            "size": spec["size"],
+            "output_format": spec["format"],
+            "background": spec["background"],
+        }
+        sources = [identity_path]
+        sources.extend(Path(path) for path in spec["reference_images"])
+        if draft_path:
+            sources.append(draft_path)
+        deduplicated = list(dict.fromkeys(str(path.resolve()) for path in sources))
+        body, content_type = multipart_body(fields, [("image[]", Path(path)) for path in deduplicated])
+        payload = api_request("https://api.openai.com/v1/images/edits", self.api_key, raw_body=body, content_type=content_type)
+        images = extract_images(payload)
+        if len(images) != n:
+            raise ProviderError(f"Requested {n} identity-locked images but the API returned {len(images)}.")
+        return images
+
     def judge(self, spec: dict[str, Any], image_path: Path, prompt: str) -> dict[str, Any]:
         mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
         image_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode()}"
         schema = quality_schema()
         content: list[dict[str, Any]] = [{"type": "input_text", "text": quality_prompt(spec, prompt)}]
         truth_sources = [region["source_path"] for region in spec["product_truth_map"]["regions"]]
-        judge_references = list(dict.fromkeys(list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]] + truth_sources))
+        model_source = spec["model_identity_lock"].get("source_path")
+        judge_references = list(dict.fromkeys(list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]] + truth_sources + ([model_source] if model_source else [])))
         if judge_references:
             content.append(
                 {
                     "type": "input_text",
-                    "text": "The next image or images are role-scoped source references. Compare only the dimension declared before each image. Product/logo/identity sources control protected identity and materials; style/layout/lighting/background/typography/palette sources must not be treated as product identity.",
+                    "text": "The next image or images are role-scoped source references. Compare only the dimension declared before each image. Product/logo/identity sources control protected product identity and materials; a model source controls only the person's face identity; style/layout/lighting/background/typography/palette sources must not be treated as product or face identity.",
                 }
             )
             role_lookup = {asset["path"]: asset for asset in spec.get("reference_assets", [])}
@@ -977,6 +1055,8 @@ class OpenAIProvider:
                 asset = role_lookup.get(reference)
                 if asset:
                     content.append({"type": "input_text", "text": f"Reference role={asset['role']}; view={asset['view']}; identity={asset['identity_id'] or 'not-applicable'}."})
+                if model_source and str(reference_path) == str(Path(model_source)):
+                    content.append({"type": "input_text", "text": "Authoritative Single Model Face Lock source. Compare facial identity only; pose, expression, clothing, camera, and background may differ."})
                 if truth_lookup.get(reference):
                     content.append({"type": "input_text", "text": "Truth-map source for regions: " + ", ".join(f"{region['name']} ({region['role']}, bbox={region['bbox']})" for region in truth_lookup[reference]) + "."})
                 reference_mime = mimetypes.guess_type(reference_path.name)[0] or "image/png"
@@ -1047,6 +1127,9 @@ def quality_schema() -> dict[str, Any]:
             "instruction_following": {"type": "boolean"},
             "reference_preservation": {"type": "boolean"},
             "text_correctness": {"type": "boolean"},
+            "model_identity_match": {"type": "boolean"},
+            "model_identity_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "model_identity_observations": {"type": "string"},
             "region_fidelity": {
                 "type": "array",
                 "items": {
@@ -1077,6 +1160,9 @@ def quality_schema() -> dict[str, Any]:
             "instruction_following",
             "reference_preservation",
             "text_correctness",
+            "model_identity_match",
+            "model_identity_confidence",
+            "model_identity_observations",
             "region_fidelity",
             "scores",
             "defects",
@@ -1094,6 +1180,7 @@ CAMPAIGN_VISION_DIMENSIONS = [
     "lighting_coherence",
     "spacing_grid_consistency",
     "diversity_preserved",
+    "model_face_consistency",
 ]
 
 
@@ -1132,6 +1219,11 @@ def campaign_vision_schema() -> dict[str, Any]:
 
 def campaign_vision_prompt(spec: dict[str, Any], indices: list[int]) -> str:
     campaign = spec["campaign"]
+    model_rule = (
+        "Single Model Face Lock is enabled: verify that every visible model is recognizably the same individual face while allowing requested pose, expression, outfit, camera, and scene variation. Any different face is a material outlier."
+        if spec["model_identity_lock"]["enabled"]
+        else "Single Model Face Lock is disabled; score model_face_consistency as 5 unless the brief independently requires one recurring person."
+    )
     return f"""Act as the senior campaign art director for a true cross-image review. Compare all attached outputs together, not independently.
 
 CAMPAIGN ID: {campaign['id']}
@@ -1142,6 +1234,8 @@ OUTPUT INDICES: {indices}
 
 Verify shared palette logic, typography system, logo treatment and safe-zone behavior, product-scale rhythm, lighting family, spacing/grid logic, and professional finish. Also verify meaningful composition/camera/background diversity; consistency must not become duplication. Product identity and truth-region locks remain non-negotiable.
 
+{model_rule}
+
 Score every dimension from 0 to 5. The required average is {campaign['vision_lock']['min_score']:.1f}/5. Mark passed only when the average reaches the threshold and there are no material campaign outliers. Identify only genuine outlier indices. Provide defect-specific repair instructions for each outlier without changing protected products, logos, exact text, or passing outputs."""
 
 
@@ -1150,11 +1244,15 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
     fidelity_gate = "No reference-fidelity gate applies."
     if spec["fidelity_mode"] == "guided":
         fidelity_gate = "Assess reference similarity as guidance and report material drift, but do not require literal source identity."
-    elif spec["fidelity_mode"] == "strict" and (spec["protected_reference"] or spec["locked_layers"]):
+    elif spec["fidelity_mode"] == "strict" and (spec["protected_product_reference"] or spec["locked_layers"]):
         fidelity_gate = (
             "STRICT SOURCE-ASSET GATE: mark reference_preservation false and fail the gates for any change to product silhouette, proportions, construction, fabric weave, fibers, texture, finish, stitching, seams, folds, print, color, label, or logo. "
             "A logo fails for altered symbol geometry, lettering, spelling, spacing, color, aspect ratio, placement, cropping, distortion, redraw, or generated approximation. "
             "Do not excuse drift because the result is visually attractive."
+        )
+    elif spec["fidelity_mode"] == "strict" and spec["protected_model_reference"]:
+        fidelity_gate = (
+            "STRICT MODEL IDENTITY GATE: compare only the recurring person's facial identity against the model reference. Require the same individual while allowing requested changes to pose, expression, clothing, camera, lighting, and background."
         )
     palette_gate = ""
     if spec["brand"].get("palette_source") == "auto-reference":
@@ -1191,6 +1289,18 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
             f"PRODUCT REGION TRUTH GATE: evaluate every contract by exact name and return one region_fidelity result per contract: {json.dumps(region_contracts, ensure_ascii=False, sort_keys=True)}. "
             "Any failed required region must make reference_preservation and gates_pass false. Literal-source-composite regions should pass when the recorded source-derived layer is visibly intact."
         )
+    model_identity_gate = "Single Model Face Lock is disabled. Return model_identity_match=true, confidence=1, and a not-applicable observation."
+    if spec["model_identity_lock"]["enabled"]:
+        if spec["model_identity_lock"].get("source_path"):
+            model_identity_gate = (
+                f"SINGLE MODEL FACE GATE: compare the generated model with the authoritative face anchor. Require the same recognizable individual, preserving {_join(spec['model_identity_lock']['preserve'])}. "
+                f"Fail gates_pass and model_identity_match for a different person, lookalike replacement, blended identity, materially changed facial structure, ethnicity, skin tone, or apparent age. "
+                f"The minimum acceptable comparison confidence is {spec['model_identity_lock']['min_confidence']:.2f}. Do not fail merely because pose, expression, outfit, camera, lighting, or background differs."
+            )
+        else:
+            model_identity_gate = (
+                "SINGLE MODEL FACE ANCHOR GATE: this output establishes the recurring person. Require exactly one clear, natural, unobscured, non-duplicated face suitable as the identity anchor; return model_identity_match=true when usable."
+            )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
@@ -1207,6 +1317,8 @@ Fail the gates if the image is a collage/grid/multi-panel output, misses require
 {marketplace_gate}
 
 {truth_gate}
+
+{model_identity_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -1500,12 +1612,14 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
         strict_reference_unverified = (
             spec["fidelity_mode"] == "strict" and spec["protected_reference"] and bool(spec["reference_images"]) and not spec["locked_layers"]
         )
-        if strict_reference_unverified:
+        model_identity_unverified = spec["model_identity_lock"]["enabled"] and bool(spec["model_identity_lock"].get("source_path"))
+        if strict_reference_unverified or model_identity_unverified:
+            reason = "Single Model Face Lock was not verified because the vision judge is disabled." if model_identity_unverified else "Strict generative reference fidelity was not verified because the vision judge is disabled."
             return {
                 "passed": False,
                 "average_score": None,
-                "defects": ["Strict generative reference fidelity was not verified because the vision judge is disabled."],
-                "repair_prompt": "Enable reference-aware vision judging or use locked_layers for source-derived compositing.",
+                "defects": [reason],
+                "repair_prompt": "Enable reference-aware vision judging so the protected source can be compared.",
                 "structural": structural,
                 "vision": None,
                 "evidence_note": "Strict fidelity cannot pass without comparison evidence.",
@@ -1525,6 +1639,14 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
     gates = bool(vision.get("gates_pass")) and not bool(vision.get("collage_violation"))
     if spec["fidelity_mode"] == "strict" and (spec["protected_reference"] or spec["locked_layers"]):
         gates = gates and bool(vision.get("reference_preservation"))
+    if spec["model_identity_lock"]["enabled"]:
+        identity_match = bool(vision.get("model_identity_match"))
+        identity_confidence = float(vision.get("model_identity_confidence", 0))
+        if not identity_match or identity_confidence < spec["model_identity_lock"]["min_confidence"]:
+            gates = False
+            defects.append(
+                f"Single Model Face Lock failed (match={identity_match}, confidence={identity_confidence:.3f}, required={spec['model_identity_lock']['min_confidence']:.3f})."
+            )
     required_regions = {region["name"] for region in spec["product_truth_map"]["regions"] if region["required"]}
     region_results = {str(result.get("name")): result for result in vision.get("region_fidelity", [])}
     missing_regions = sorted(required_regions - set(region_results))
@@ -1573,12 +1695,42 @@ def save_image(path: Path, payload: bytes) -> None:
     temporary.replace(path)
 
 
+def model_identity_anchor_path(context: RunContext) -> Path | None:
+    policy = context.spec["model_identity_lock"]
+    if not policy["enabled"]:
+        return None
+    if policy.get("source_path"):
+        return Path(policy["source_path"])
+    state = context.manifest.get("model_identity_lock") or {}
+    anchor_file = state.get("anchor_file")
+    if not anchor_file:
+        return None
+    path = Path(anchor_file)
+    return path if path.is_absolute() else context.job_dir / path
+
+
+def runtime_spec_for_item(context: RunContext, item: dict[str, Any]) -> dict[str, Any]:
+    anchor_path = model_identity_anchor_path(context)
+    if not anchor_path:
+        return context.spec
+    if not anchor_path.is_file():
+        raise RendrivaError(f"Model identity anchor is missing: {anchor_path}")
+    runtime_spec = copy.deepcopy(context.spec)
+    runtime_spec["model_identity_lock"]["source_path"] = str(anchor_path.resolve())
+    runtime_spec["model_identity_lock"]["source_sha256"] = hashlib.sha256(anchor_path.read_bytes()).hexdigest()
+    runtime_spec["model_identity_lock"]["anchor_strategy"] = (context.manifest.get("model_identity_lock") or {}).get("anchor_strategy", runtime_spec["model_identity_lock"]["anchor_strategy"])
+    item["model_identity_anchor_file"] = str(anchor_path.relative_to(context.job_dir)) if anchor_path.is_relative_to(context.job_dir) else str(anchor_path)
+    item["model_identity_anchor_sha256"] = runtime_spec["model_identity_lock"]["source_sha256"]
+    return runtime_spec
+
+
 def review_image(context: RunContext, item: dict[str, Any], prompt: str, image_path: Path) -> dict[str, Any]:
-    structural = structural_review(context.spec, image_path)
+    review_spec = runtime_spec_for_item(context, item)
+    structural = structural_review(review_spec, image_path)
     vision = None
     if structural["passed"] and context.use_vision_judge:
-        vision = context.provider.judge(context.spec, image_path, prompt)
-    return finalize_review(context.spec, structural, vision)
+        vision = context.provider.judge(review_spec, image_path, prompt)
+    return finalize_review(review_spec, structural, vision)
 
 
 def apply_diversity_gate(context: RunContext, item: dict[str, Any], image_path: Path, review: dict[str, Any]) -> dict[str, Any]:
@@ -1606,16 +1758,25 @@ def apply_diversity_gate(context: RunContext, item: dict[str, Any], image_path: 
     return review
 
 
-def create_item_payload(context: RunContext, item: dict[str, Any], prompt: str) -> bytes:
+def create_item_payload(context: RunContext, item: dict[str, Any], prompt: str, generation_spec: dict[str, Any] | None = None) -> bytes:
+    generation_spec = generation_spec or runtime_spec_for_item(context, item)
     selected_draft = item.get("selected_draft_file")
+    identity_path = Path(generation_spec["model_identity_lock"]["source_path"]) if generation_spec["model_identity_lock"]["enabled"] and generation_spec["model_identity_lock"].get("source_path") else None
+    if identity_path:
+        if not hasattr(context.provider, "create_with_identity"):
+            raise ProviderError("The configured provider does not support Single Model Face Lock generation.")
+        draft_path = context.job_dir / selected_draft if selected_draft else None
+        if draft_path and not draft_path.is_file():
+            raise RendrivaError(f"Selected draft file is missing: {selected_draft}")
+        return context.provider.create_with_identity(generation_spec, prompt, identity_path, draft_path=draft_path, n=1)[0]
     if selected_draft:
         draft_path = context.job_dir / selected_draft
         if not draft_path.is_file():
             raise RendrivaError(f"Selected draft file is missing: {selected_draft}")
         if not hasattr(context.provider, "promote"):
             raise ProviderError("The configured provider does not support draft-to-final promotion.")
-        return context.provider.promote(context.spec, prompt, draft_path, n=1)[0]
-    return context.provider.create(context.spec, prompt, n=1)[0]
+        return context.provider.promote(generation_spec, prompt, draft_path, n=1)[0]
+    return context.provider.create(generation_spec, prompt, n=1)[0]
 
 
 def process_item(
@@ -1626,7 +1787,7 @@ def process_item(
 ) -> None:
     if context.cancelled.is_set():
         return
-    spec = context.spec
+    spec = runtime_spec_for_item(context, item)
     image_path = context.job_dir / item["file"]
     prompt = actual_prompt or compile_prompt(spec, item)
     item["compiled_prompt"] = prompt
@@ -1635,7 +1796,7 @@ def process_item(
         item["attempts"] += 1
         context.persist()
         context.progress(f"Image {item['index']}/{spec['count']} — generating")
-        payload = initial_bytes if initial_bytes is not None else create_item_payload(context, item, prompt)
+        payload = initial_bytes if initial_bytes is not None else create_item_payload(context, item, prompt, spec)
         save_image(image_path, payload)
         item["locked_layer_composite"] = apply_locked_layers(image_path, spec["locked_layers"])
         item["text_overlay"] = apply_text_layers(image_path, spec["text_layers"])
@@ -1658,7 +1819,7 @@ def process_item(
             context.persist()
             context.progress(f"Image {item['index']}/{spec['count']} — repairing")
             repair_prompt = compile_prompt(spec, item, repair=review)
-            repaired = create_item_payload(context, item, repair_prompt)
+            repaired = create_item_payload(context, item, repair_prompt, spec)
             repair_path = image_path.with_name(f"{image_path.stem}-repair-{item['repair_attempts']}{image_path.suffix}")
             save_image(repair_path, repaired)
             locked_composite = apply_locked_layers(repair_path, spec["locked_layers"])
@@ -1722,12 +1883,30 @@ def run_draft_to_final(context: RunContext) -> None:
     common_item["draft_candidate"] = True
     prompt = compile_prompt(draft_spec, common_item)
     context.progress(f"Generating {policy['candidate_count']} low-cost draft candidates for selection")
-    payloads = context.provider.create(draft_spec, prompt, n=policy["candidate_count"])
+    draft_root = context.job_dir / "drafts"
+    draft_root.mkdir(parents=True, exist_ok=True)
+    draft_identity_anchor = model_identity_anchor_path(context) if context.spec["model_identity_lock"]["enabled"] else None
+    if context.spec["model_identity_lock"]["enabled"] and not hasattr(context.provider, "create_with_identity"):
+        raise ProviderError("The configured provider does not support Single Model Face Lock draft generation.")
+    if draft_identity_anchor:
+        identity_draft_spec = copy.deepcopy(draft_spec)
+        identity_draft_spec["model_identity_lock"]["source_path"] = str(draft_identity_anchor.resolve())
+        identity_prompt = compile_prompt(identity_draft_spec, common_item)
+        payloads = context.provider.create_with_identity(identity_draft_spec, identity_prompt, draft_identity_anchor, n=policy["candidate_count"])
+    elif context.spec["model_identity_lock"]["enabled"]:
+        first_payload = context.provider.create(draft_spec, compile_prompt(draft_spec, {**draft_plan[0], "draft_candidate": True}), n=1)[0]
+        draft_identity_anchor = draft_root / f"draft-01.{extension_for(context.spec['format'])}"
+        save_image(draft_identity_anchor, first_payload)
+        identity_draft_spec = copy.deepcopy(draft_spec)
+        identity_draft_spec["model_identity_lock"]["source_path"] = str(draft_identity_anchor.resolve())
+        identity_prompt = compile_prompt(identity_draft_spec, common_item)
+        remaining = context.provider.create_with_identity(identity_draft_spec, identity_prompt, draft_identity_anchor, n=policy["candidate_count"] - 1)
+        payloads = [first_payload, *remaining]
+    else:
+        payloads = context.provider.create(draft_spec, prompt, n=policy["candidate_count"])
     if len(payloads) != policy["candidate_count"]:
         raise ProviderError(f"Draft provider returned {len(payloads)} candidates for {policy['candidate_count']} planned drafts.")
 
-    draft_root = context.job_dir / "drafts"
-    draft_root.mkdir(parents=True, exist_ok=True)
     candidates: list[dict[str, Any]] = []
     for candidate_index, payload in enumerate(payloads, start=1):
         relative = f"drafts/draft-{candidate_index:02d}.{extension_for(context.spec['format'])}"
@@ -1741,10 +1920,15 @@ def run_draft_to_final(context: RunContext) -> None:
         }
         candidate_item = draft_plan[candidate_index - 1]
         candidate_item["draft_candidate"] = True
-        candidate_prompt = compile_prompt(draft_spec, candidate_item)
-        structural = structural_review(draft_spec, path)
-        vision = context.provider.judge(draft_spec, path, candidate_prompt) if structural["passed"] and context.use_vision_judge else None
-        review = finalize_review(draft_spec, structural, vision)
+        candidate_spec = draft_spec
+        if draft_identity_anchor and (context.spec["model_identity_lock"].get("source_path") or candidate_index > 1):
+            candidate_spec = copy.deepcopy(draft_spec)
+            candidate_spec["model_identity_lock"]["source_path"] = str(draft_identity_anchor.resolve())
+            candidate_spec["model_identity_lock"]["source_sha256"] = hashlib.sha256(draft_identity_anchor.read_bytes()).hexdigest()
+        candidate_prompt = compile_prompt(candidate_spec, candidate_item)
+        structural = structural_review(candidate_spec, path)
+        vision = context.provider.judge(candidate_spec, path, candidate_prompt) if structural["passed"] and context.use_vision_judge else None
+        review = finalize_review(candidate_spec, structural, vision)
         candidates.append(
             {
                 "index": candidate_index,
@@ -1757,6 +1941,13 @@ def run_draft_to_final(context: RunContext) -> None:
                 "selected": False,
             }
         )
+
+    if context.spec["model_identity_lock"]["enabled"] and not context.spec["model_identity_lock"].get("source_path"):
+        if not candidates or candidates[0]["status"] != "PASS":
+            raise RendrivaError("The first draft could not establish an approved model face identity anchor.")
+        record_model_identity_anchor(context, draft_identity_anchor, "first-approved-draft")
+    elif context.spec["model_identity_lock"]["enabled"] and draft_identity_anchor:
+        record_model_identity_anchor(context, draft_identity_anchor, "supplied-reference")
 
     if policy["selection_mode"] == "manual":
         selected = list(policy["selection"])
@@ -1794,6 +1985,60 @@ def run_draft_to_final(context: RunContext) -> None:
     context.persist()
 
 
+def record_model_identity_anchor(context: RunContext, path: Path, strategy: str, output_index: int | None = None) -> None:
+    if not path.is_file():
+        raise RendrivaError(f"Cannot establish model identity anchor from missing file: {path}")
+    anchor_file = str(path.relative_to(context.job_dir)) if path.is_relative_to(context.job_dir) else str(path.resolve())
+    context.manifest["model_identity_lock"] = {
+        **context.spec["model_identity_lock"],
+        "status": "ACTIVE",
+        "anchor_strategy": strategy,
+        "anchor_file": anchor_file,
+        "anchor_output_index": output_index,
+        "anchor_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    context.persist()
+
+
+def run_model_identity_generation(context: RunContext, items: list[dict[str, Any]]) -> None:
+    policy = context.spec["model_identity_lock"]
+    anchor_path = model_identity_anchor_path(context)
+    if policy.get("source_path") and not (context.manifest.get("model_identity_lock") or {}).get("anchor_file"):
+        anchor_path = Path(policy["source_path"])
+        record_model_identity_anchor(context, anchor_path, "supplied-reference")
+    if anchor_path is None:
+        existing_anchor = next(
+            (
+                item for item in sorted(context.manifest["outputs"], key=lambda value: value["index"])
+                if item["status"] == "PASS" and (context.job_dir / item["file"]).is_file()
+            ),
+            None,
+        )
+        if existing_anchor:
+            anchor_path = context.job_dir / existing_anchor["file"]
+            record_model_identity_anchor(context, anchor_path, "first-approved-output", existing_anchor["index"])
+    if anchor_path is None:
+        anchor_item = min(items, key=lambda value: value["index"])
+        context.progress(f"Image {anchor_item['index']}/{context.spec['count']} — establishing the single model face anchor")
+        process_item(context, anchor_item)
+        if anchor_item["status"] != "PASS":
+            error = "The first model could not establish an approved face identity anchor."
+            for item in items:
+                if item is not anchor_item and item["status"] != "PASS":
+                    item["status"] = "FAILED"
+                    item["error"] = error
+            context.manifest["model_identity_lock"] = {**policy, "status": "FAILED", "reason": error}
+            context.persist()
+            return
+        anchor_path = context.job_dir / anchor_item["file"]
+        record_model_identity_anchor(context, anchor_path, "first-approved-output", anchor_item["index"])
+    context.progress(f"Single Model Face Lock active — using {anchor_path.name} for all remaining variants")
+    for item in sorted(items, key=lambda value: value["index"]):
+        if item["status"] == "PASS":
+            continue
+        process_item(context, item)
+
+
 def run_generation(context: RunContext) -> None:
     items = [item for item in context.manifest["outputs"] if item["status"] != "PASS"]
     if not items:
@@ -1801,6 +2046,9 @@ def run_generation(context: RunContext) -> None:
         return
 
     spec = context.spec
+    if spec["model_identity_lock"]["enabled"]:
+        run_model_identity_generation(context, items)
+        return
     can_batch = spec["mode"] == "variations" and spec["operation"] == "generate" and not spec["reference_images"] and not spec["draft_to_final"]["enabled"]
     if can_batch and all(item["attempts"] == 0 for item in items):
         common_item = dict(items[0])
@@ -1858,12 +2106,13 @@ def repair_campaign_outlier(context: RunContext, item: dict[str, Any], campaign_
         "defects": defects_lookup.get(item["index"], ["This image is a visual outlier in the campaign batch."]),
         "repair_prompt": prompt_lookup.get(item["index"], "Match the shared campaign system while keeping this composition distinct."),
     }
-    prompt = compile_prompt(context.spec, item, repair=repair)
+    runtime_spec = runtime_spec_for_item(context, item)
+    prompt = compile_prompt(runtime_spec, item, repair=repair)
     temporary_path = (context.job_dir / item["file"]).with_name(f"{Path(item['file']).stem}-campaign-repair-{attempt}{Path(item['file']).suffix}")
-    payload = create_item_payload(context, item, prompt)
+    payload = create_item_payload(context, item, prompt, runtime_spec)
     save_image(temporary_path, payload)
-    locked = apply_locked_layers(temporary_path, context.spec["locked_layers"])
-    overlay = apply_text_layers(temporary_path, context.spec["text_layers"])
+    locked = apply_locked_layers(temporary_path, runtime_spec["locked_layers"])
+    overlay = apply_text_layers(temporary_path, runtime_spec["text_layers"])
     review = apply_diversity_gate(context, item, temporary_path, review_image(context, item, prompt, temporary_path))
     item.setdefault("campaign_repair_history", []).append(
         {"attempt": attempt, "file": temporary_path.name, "prompt": prompt, "quality": review, "locked_layer_composite": locked, "text_overlay": overlay}
@@ -1880,7 +2129,7 @@ def repair_campaign_outlier(context: RunContext, item: dict[str, Any], campaign_
 def run_campaign_vision_lock(context: RunContext) -> None:
     policy = context.spec["campaign"]["vision_lock"]
     existing = context.manifest.get("campaign_visual_review") or {}
-    if existing.get("verified") and existing.get("passed"):
+    if (existing.get("verified") or existing.get("comparison_executed")) and existing.get("passed"):
         return
     passing = [item for item in context.manifest["outputs"] if item["status"] == "PASS"]
     if not policy["enabled"] or len(passing) < 2:
@@ -1907,6 +2156,10 @@ def run_campaign_vision_lock(context: RunContext) -> None:
         passing = [item for item in context.manifest["outputs"] if item["status"] == "PASS"]
         images = [(item["index"], context.job_dir / item["file"]) for item in passing]
         review = finalize_campaign_vision_review(context.spec, context.provider.judge_campaign(context.spec, images))
+        review["comparison_executed"] = True
+        review["synthetic_evidence"] = bool(getattr(context.provider, "synthetic_evidence", False))
+        if review["synthetic_evidence"]:
+            review["verified"] = False
         attempts.append({"attempt": attempt, "review": review})
         if review["passed"]:
             context.manifest["campaign_visual_review"] = {**review, "attempts": attempts}
@@ -1933,6 +2186,7 @@ def run_campaign_vision_lock(context: RunContext) -> None:
 
 
 def quality_report(manifest: dict[str, Any]) -> dict[str, Any]:
+    synthetic = manifest.get("evidence_mode") == "synthetic-mock"
     counts = {status: 0 for status in ("PASS", "FAILED", "BLOCKED", "NEEDS_REPAIR")}
     results = []
     for item in manifest["outputs"]:
@@ -1947,18 +2201,75 @@ def quality_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 "average_score": (item.get("quality") or {}).get("average_score"),
                 "defects": (item.get("quality") or {}).get("defects", []),
                 "error": item.get("error"),
+                "visual_verification_status": "SYNTHETIC_TEST_ONLY" if synthetic else "VERIFIED" if item["status"] == "PASS" else "NOT_VERIFIED",
             }
         )
     return {
         "job_id": manifest["job_id"],
+        "evidence_mode": manifest.get("evidence_mode", "vision-provider"),
+        "delivery_ready": not synthetic and counts["FAILED"] == 0 and counts["BLOCKED"] == 0,
+        "verification_note": "Mock outputs validate orchestration only and are not delivery-ready visual evidence." if synthetic else "Passing outputs were evaluated by the configured provider workflow.",
         "counts": counts,
         "campaign_visual_review": manifest.get("campaign_visual_review"),
         "draft_selection": manifest.get("draft_selection"),
+        "model_identity_report": manifest.get("model_identity_report"),
         "outputs": results,
     }
 
 
+def build_model_identity_report(manifest: dict[str, Any], job_dir: Path) -> dict[str, Any]:
+    policy = manifest["spec"]["model_identity_lock"]
+    state = manifest.get("model_identity_lock") or {}
+    anchor_output_index = state.get("anchor_output_index")
+    outputs = []
+    comparisons = []
+    for item in manifest["outputs"]:
+        vision = (item.get("quality") or {}).get("vision") or {}
+        record = {
+            "index": item["index"],
+            "file": item["file"],
+            "status": item["status"],
+            "is_generated_anchor": item["index"] == anchor_output_index,
+            "anchor_sha256": item.get("model_identity_anchor_sha256"),
+            "match": vision.get("model_identity_match"),
+            "confidence": vision.get("model_identity_confidence"),
+            "observations": vision.get("model_identity_observations"),
+        }
+        outputs.append(record)
+        if policy["enabled"] and item["index"] != anchor_output_index:
+            comparisons.append(record)
+    comparison_passed = bool(policy["enabled"] and comparisons) and all(
+        record["status"] == "PASS"
+        and record["match"] is True
+        and isinstance(record["confidence"], (int, float))
+        and float(record["confidence"]) >= policy["min_confidence"]
+        for record in comparisons
+    )
+    synthetic_evidence = manifest.get("evidence_mode") == "synthetic-mock"
+    verified = comparison_passed and not synthetic_evidence
+    anchor_file = state.get("anchor_file", policy.get("source_path"))
+    anchor_path = Path(anchor_file) if anchor_file else None
+    if anchor_path and not anchor_path.is_absolute():
+        anchor_path = job_dir / anchor_path
+    current_anchor_sha256 = hashlib.sha256(anchor_path.read_bytes()).hexdigest() if anchor_path and anchor_path.is_file() else state.get("anchor_sha256", policy.get("source_sha256"))
+    return {
+        "enabled": policy["enabled"],
+        "mode": policy["mode"],
+        "status": "DISABLED" if not policy["enabled"] else "SYNTHETIC_TEST_ONLY" if comparison_passed and synthetic_evidence else "PASS" if verified else "FAILED_OR_UNVERIFIED",
+        "verified": verified,
+        "comparison_passed": comparison_passed,
+        "synthetic_evidence": synthetic_evidence,
+        "anchor_strategy": state.get("anchor_strategy", policy["anchor_strategy"]),
+        "anchor_file": anchor_file,
+        "anchor_sha256": current_anchor_sha256,
+        "anchor_output_index": anchor_output_index,
+        "min_confidence": policy["min_confidence"],
+        "outputs": outputs,
+    }
+
+
 def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
+    manifest["model_identity_report"] = build_model_identity_report(manifest, job_dir)
     report_path = job_dir / "quality-report.json"
     json_dump(report_path, quality_report(manifest))
     export_records = create_platform_exports(job_dir, manifest)
@@ -1973,6 +2284,8 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
         draft_path,
         manifest.get("draft_selection", {"status": "DISABLED", "reason": "Draft-to-final workflow was not enabled."}),
     )
+    model_identity_path = job_dir / "model-identity-report.json"
+    json_dump(model_identity_path, manifest["model_identity_report"])
     campaign_path = job_dir / "campaign-report.json"
     campaign_review = manifest.get("campaign_visual_review") or {}
     json_dump(
@@ -1980,13 +2293,16 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
         {
             "job_id": manifest["job_id"],
             "campaign": manifest["spec"]["campaign"],
-            "evidence_scope": "cross-image-vision-comparison" if campaign_review.get("verified") else "policy-and-per-output-qa",
+            "evidence_scope": "cross-image-vision-comparison" if campaign_review.get("verified") else "synthetic-mock-comparison" if campaign_review.get("synthetic_evidence") else "policy-and-per-output-qa",
             "batch_visual_consistency_verified": bool(campaign_review.get("verified")),
-            "batch_visual_consistency_passed": bool(campaign_review.get("passed")),
+            "batch_visual_consistency_passed": bool(campaign_review.get("passed")) and not bool(campaign_review.get("synthetic_evidence")),
+            "synthetic_comparison_passed": bool(campaign_review.get("passed")) if campaign_review.get("synthetic_evidence") else None,
             "vision_review": campaign_review,
             "verification_note": (
                 "All passing outputs were compared together by Campaign Vision Lock."
                 if campaign_review.get("verified")
+                else "The mock provider exercised the comparison workflow, but its placeholder outputs do not verify real visual consistency."
+                if campaign_review.get("synthetic_evidence")
                 else "Shared tokens and per-output QA are recorded, but cross-image vision comparison was unavailable or unnecessary."
             ),
             "outputs": [
@@ -2004,7 +2320,7 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
                 image_path = job_dir / item["file"]
                 if image_path.is_file():
                     archive.write(image_path, arcname=image_path.name)
-        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path, draft_path):
+        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path, draft_path, model_identity_path):
             archive.write(path, arcname=path.name)
         export_root = job_dir / "platform-exports"
         if export_root.is_dir():
@@ -2051,6 +2367,13 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
         "marketplace": spec["marketplace"],
         "product_truth_map": spec["product_truth_map"],
         "draft_to_final": spec["draft_to_final"],
+        "model_identity_lock": {
+            **spec["model_identity_lock"],
+            "status": "ACTIVE" if spec["model_identity_lock"].get("source_path") else "PENDING" if spec["model_identity_lock"]["enabled"] else "DISABLED",
+            "anchor_file": spec["model_identity_lock"].get("source_path"),
+            "anchor_sha256": spec["model_identity_lock"].get("source_sha256"),
+            "anchor_output_index": None,
+        },
         "spec": spec,
         "outputs": build_plan(spec),
     }
@@ -2079,6 +2402,8 @@ def execute(
         manifest = create_manifest(spec, job_id)
         json_dump(manifest_path, manifest)
 
+    manifest["evidence_mode"] = "synthetic-mock" if bool(getattr(provider, "synthetic_evidence", False)) else "vision-provider"
+
     cancelled = threading.Event()
 
     def cancel_handler(_signum: int, _frame: Any) -> None:
@@ -2106,6 +2431,8 @@ def execute(
 
 class MockProvider:
     """Deterministic provider used only by tests and the explicit --mock option."""
+
+    synthetic_evidence = True
 
     def create(self, spec: dict[str, Any], prompt: str, n: int = 1) -> list[bytes]:
         if Image is None:
@@ -2142,6 +2469,9 @@ class MockProvider:
             "instruction_following": True,
             "reference_preservation": True,
             "text_correctness": True,
+            "model_identity_match": True,
+            "model_identity_confidence": 1.0,
+            "model_identity_observations": "Mock face-identity comparison passed.",
             "region_fidelity": [
                 {"name": region["name"], "passed": True, "confidence": 1.0, "observations": "Mock truth-region comparison passed."}
                 for region in spec["product_truth_map"]["regions"]
@@ -2154,6 +2484,18 @@ class MockProvider:
 
     def promote(self, spec: dict[str, Any], prompt: str, draft_path: Path, n: int = 1) -> list[bytes]:
         return self.create(spec, f"{prompt}|promoted-from={draft_path.name}", n=n)
+
+    def create_with_identity(
+        self,
+        spec: dict[str, Any],
+        prompt: str,
+        identity_path: Path,
+        *,
+        draft_path: Path | None = None,
+        n: int = 1,
+    ) -> list[bytes]:
+        draft_label = draft_path.name if draft_path else "none"
+        return self.create(spec, f"{prompt}|identity={identity_path.name}|draft={draft_label}", n=n)
 
     def judge_campaign(self, spec: dict[str, Any], images: list[tuple[int, Path]]) -> dict[str, Any]:
         return {
