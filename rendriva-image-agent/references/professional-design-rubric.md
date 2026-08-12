@@ -27,6 +27,7 @@ Fail an output when any applicable condition is true:
 - A face, hand, logo, product, pattern, or material has a severe artifact.
 - The requested dimensions, transparency, or file format are wrong.
 - It contains a prohibited object or invented brand/product detail.
+- It ignores an automatically extracted reference palette and introduces unrelated dominant colors without a purposeful contrast or accessibility reason.
 
 ## Scored dimensions
 

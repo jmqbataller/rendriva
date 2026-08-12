@@ -59,6 +59,8 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Apply exact text layers after generation.
 - Composite optional transparent `locked_layers` before typography for source-derived product accuracy.
 - Default reference jobs to strict fidelity, protecting product construction, material, fabric texture, print, labels, color, proportions, and exact logo geometry.
+- Automatically extract a usable brand palette from any supplied reference images. Prioritize a locked logo layer, then combine distinct colors from the remaining references.
+- Apply the derived palette only to unprotected design elements and record its colors plus source fingerprints in the manifest.
 - Record each locked layer's role and SHA-256 source fingerprint in the manifest; never generatively repair inside a source-derived layer.
 - Run structural checks and, by default, a vision-based professional-design judge.
 - Regenerate only an item marked `NEEDS_REPAIR`, once by default.

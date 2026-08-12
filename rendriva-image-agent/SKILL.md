@@ -1,6 +1,6 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, and any request for multiple individually downloadable images. Apply professional art direction, strict source-asset locks for product fabric, texture, construction, print, and logos, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, and any request for multiple individually downloadable images. Apply professional art direction, automatically derive the brand palette from any supplied reference image, enforce strict source-asset locks for product fabric, texture, construction, print, and logos, and use per-image quality judging and targeted repair so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
@@ -56,6 +56,14 @@ Translate the user's instruction into a per-image brief containing:
 Keep user facts and constraints authoritative. Do not invent logos, copy, product features, achievements, accessories, or brand details.
 
 Use [references/professional-design-rubric.md](references/professional-design-rubric.md) when compiling prompts or judging outputs.
+
+## Derive the brand palette
+
+- When the user supplies any reference image, automatically extract its dominant usable colors and treat them as the default brand palette unless the user supplies an explicit palette.
+- When several references exist, combine their distinct dominant colors. Prioritize an identified shop-logo reference, then the first authoritative reference.
+- Apply the derived palette to backgrounds, accents, typography, graphic shapes, and overall design-system choices with readable contrast and restrained neutral support.
+- Never recolor or tint a protected product, garment, artwork, or logo to match the derived palette. Reference fidelity remains authoritative over palette harmony.
+- Keep palette selection deterministic for file-backed jobs and record colors plus source fingerprints in the manifest.
 
 ## Preserve references
 
