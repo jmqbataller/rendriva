@@ -1,0 +1,161 @@
+# Rendriva advanced features
+
+Rendriva 1.3 adds ten production controls while preserving the original one-to-ten separate-output contract.
+
+## Reference Intelligence and multi-view identity
+
+Use `reference_assets` when each source has a distinct purpose. A filename-based detector supplies the role and view when omitted; explicit values always win.
+
+```json
+{
+  "operation": "edit",
+  "reference_assets": [
+    {"path": "./shop-logo.png", "role": "logo"},
+    {"path": "./shirt-front.png", "role": "product", "view": "front", "identity_id": "shirt-01"},
+    {"path": "./shirt-back.png", "role": "product", "view": "back", "identity_id": "shirt-01"},
+    {"path": "./mood.jpg", "role": "style", "use_for_palette": false}
+  ],
+  "product_identity": {"required_views": ["front", "back"]}
+}
+```
+
+Supported roles are `product`, `logo`, `style`, `layout`, `lighting`, `background`, `typography`, `palette`, `identity`, and `general`. Product and identity references with the same `identity_id` form one identity pack. Required missing views fail validation instead of inviting invented construction.
+
+## Batch diversity and campaign consistency
+
+Campaign tokens remain stable while each output receives a different camera/composition/background direction.
+
+```json
+{
+  "count": 5,
+  "campaign": {
+    "id": "payday-august",
+    "consistency": "strict",
+    "logo_position": "top-left safe zone",
+    "grid": "8-point modular grid"
+  },
+  "diversity": {
+    "enabled": true,
+    "max_similarity": 0.992,
+    "axes": ["composition", "camera", "background", "negative-space", "lighting"]
+  }
+}
+```
+
+The deterministic diversity gate compares completed outputs and repairs or fails near-duplicates. Campaign and diversity reports document both controls.
+
+## Automatic cutout and natural shadow
+
+Use this literal source-composite path for a product on a flat background:
+
+```json
+{
+  "locked_layers": [
+    {
+      "path": "./product-on-white.jpg",
+      "role": "product",
+      "require_alpha": false,
+      "auto_cutout": true,
+      "cutout_tolerance": 28,
+      "edge_softness": 4,
+      "shadow": {
+        "enabled": true,
+        "opacity": 75,
+        "blur": 24,
+        "offset_x": 12,
+        "offset_y": 20
+      }
+    }
+  ]
+}
+```
+
+Auto cutout is intended for simple corner-matched backgrounds. Difficult hair, glass, reflective products, or complex scenery should use a prepared transparent source. The foreground RGB pixels remain source-derived; only the alpha mask, scale, position, and optional shadow are produced.
+
+## Reusable brand profiles
+
+Set `brand_profile` to an inline object or a JSON file. A job-level `brand` object overrides matching profile fields.
+
+```json
+{
+  "brand_profile": "./my-shop-brand.json",
+  "brand": {"tone": "premium, warm, direct"}
+}
+```
+
+Every adapter run writes `brand-profile.json`, including an automatically extracted palette when references define the shop colors.
+
+## Platform Export Pack
+
+```json
+{
+  "platform_exports": [
+    "shopee-square",
+    "instagram-post",
+    "instagram-story",
+    "facebook-post",
+    "website-hero",
+    "tiktok-cover"
+  ]
+}
+```
+
+Exports use contain scaling and brand-neutral padding, so the product is never cropped to force a new aspect ratio. Each source output remains a separate image, and every export is a separate PNG under `platform-exports/`.
+
+## Reference Fidelity Report
+
+`reference-fidelity-report.json` records reference roles, views, identity signatures, SHA-256 source fingerprints, per-output comparison results, and literal locked-layer evidence. It does not claim verified preservation when comparison evidence is unavailable.
+
+## Professional Typography Engine
+
+Text layers support automatic sizing, word wrapping, height limits, contrast selection, and semantic styles.
+
+```json
+{
+  "text_layers": [
+    {
+      "text": "PAYDAY SAVINGS START HERE",
+      "style": "headline",
+      "font_size": "auto",
+      "color": "auto",
+      "x": 0.08,
+      "y": 0.08,
+      "max_width": 0.48,
+      "max_height": 0.24
+    }
+  ]
+}
+```
+
+Styles are `headline`, `subheadline`, `body`, `price`, `badge`, and `caption`. Use `font_path` for an exact licensed brand font.
+
+## Marketplace Conversion Mode
+
+```json
+{
+  "marketplace": {
+    "platform": "Shopee",
+    "goal": "payday-sale",
+    "price": "₱299",
+    "original_price": "₱399",
+    "discount": "25% OFF",
+    "cta": "Shop now",
+    "claims": ["Free shipping on eligible orders"]
+  }
+}
+```
+
+Goals are `product-hero`, `price-promotion`, `payday-sale`, `new-arrival`, `bundle`, and `trust-builder`. Supplied conversion copy becomes exact typography by default. Rendriva must never invent a price, discount, bundle item, rating, guarantee, credential, urgency claim, badge, or CTA.
+
+## Output package
+
+The ZIP can contain:
+
+- each passing `image-XX` file;
+- `manifest.json`;
+- `quality-report.json`;
+- `brand-profile.json`;
+- `reference-fidelity-report.json`;
+- `diversity-report.json`;
+- `campaign-report.json`;
+- individual `platform-exports/*.png` files.

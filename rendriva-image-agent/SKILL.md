@@ -23,7 +23,7 @@ Produce commercially usable images through a strict plan, generate, inspect, and
 3. Use `scripts/rendriva.py` when an executable workspace and `OPENAI_API_KEY` are available and the user needs deterministic filenames, resumable jobs, manifests, quality reports, exact text overlays, or a ZIP archive.
 4. If no image tool and no configured API are available, produce the validated job plan and mark generation `BLOCKED`; never claim images were generated.
 
-For the executable adapter contract and commands, read [references/adapter-usage.md](references/adapter-usage.md). For supported job fields, read [references/job-spec.md](references/job-spec.md).
+For the executable adapter contract and commands, read [references/adapter-usage.md](references/adapter-usage.md). For supported job fields, read [references/job-spec.md](references/job-spec.md). For reference roles, identity packs, campaign controls, exports, reports, typography, and marketplace modes, read [references/advanced-features.md](references/advanced-features.md).
 
 ## Plan every run
 
@@ -64,6 +64,14 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 - Apply the derived palette to backgrounds, accents, typography, graphic shapes, and overall design-system choices with readable contrast and restrained neutral support.
 - Never recolor or tint a protected product, garment, artwork, or logo to match the derived palette. Reference fidelity remains authoritative over palette harmony.
 - Keep palette selection deterministic for file-backed jobs and record colors plus source fingerprints in the manifest.
+- Save the normalized identity as `brand-profile.json` so it can be reused in later shop campaigns. A job-level brand override always wins over the stored profile.
+
+## Interpret references by role
+
+- Classify every reference as product, logo, identity, palette, style, layout, lighting, background, typography, or general. Prefer explicit user roles; otherwise use deterministic filename inference and record that the role was inferred.
+- Let each reference control only its assigned dimension. Never let a mood board or lighting reference alter a protected product or logo.
+- Combine front, back, side, and detail references with the same identity ID into one multi-view product identity pack.
+- When a required view is unavailable, do not invent unseen construction. Request the matching view or fail deterministic validation.
 
 ## Preserve references
 
@@ -85,6 +93,21 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 - For posters, ads, banners, price cards, or other exact-copy work, generate a text-free visual with intentional text-safe space, then apply the exact copy programmatically.
 - Use the adapter's `text_layers` feature for file-backed jobs. Do not rely on generated pseudo-text for critical copy.
 - Reject critical text that is misspelled, distorted, cropped, or unreadable.
+- Use automatic wrapping, fit-to-zone sizing, semantic type roles, and sampled black/white contrast when exact text layers request `auto` behavior.
+- In marketplace conversion mode, use only the supplied price, discount, bundle contents, claims, badge, and CTA. Never manufacture conversion claims.
+
+## Balance diversity and campaign consistency
+
+- Give every output a distinct composition, camera, background, lighting, and negative-space direction while preserving the same product and brand identity.
+- Apply stable campaign palette, typography, logo-safe-zone, grid, and spacing tokens to all outputs in a campaign.
+- Compare passing batch outputs for near-duplicates. Repair or fail an item that exceeds the configured similarity threshold.
+- Keep campaign consistency and batch diversity as separate checks: consistent does not mean duplicated.
+
+## Prepare production exports
+
+- For literal product compositing, optionally derive a foreground alpha mask from a simple flat background and add a controlled natural shadow without modifying source RGB detail.
+- Create platform exports as separate contain-scaled files; never crop the protected product merely to fill a new aspect ratio.
+- Record source roles, views, fingerprints, identity packs, comparison results, cutout/shadow evidence, and verification limits in `reference-fidelity-report.json`.
 
 ## Generate, judge, and repair
 
@@ -104,7 +127,7 @@ Require all non-negotiable gates to pass and an average professional-design scor
 
 - Present each image separately with its index and status.
 - For native generated images, let the host display and retain them; do not reconstruct them merely to make a ZIP.
-- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, and `rendriva-output.zip`.
+- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, optional platform exports, and `rendriva-output.zip`.
 - Report exact failures and blocked capabilities. Never call a run complete beyond the available evidence.
 
 ## Production presets

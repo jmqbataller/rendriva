@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,17 @@ class PartialFailureProvider(rendriva.MockProvider):
         if "Blocked scene" in prompt:
             raise rendriva.ProviderError("Synthetic provider failure")
         return super().create(spec, prompt, n=n)
+
+
+class DuplicateProvider(rendriva.MockProvider):
+    def create(self, spec, prompt, n=1):
+        one = super().create(spec, "fixed-output", n=1)[0]
+        return [one for _ in range(n)]
+
+
+class ShortBatchProvider(rendriva.MockProvider):
+    def create(self, spec, prompt, n=1):
+        return super().create(spec, prompt, n=1)
 
 
 class RendrivaTests(unittest.TestCase):
@@ -362,6 +374,158 @@ class RendrivaTests(unittest.TestCase):
         vision["reference_preservation"] = False
         review = rendriva.finalize_review(spec, structural, vision)
         self.assertFalse(review["passed"])
+
+    def test_reference_intelligence_detects_roles_and_builds_multiview_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = []
+            for name, color in (("shop-logo.png", "#E97824"), ("shirt-front.png", "#223344"), ("shirt-back.png", "#334455"), ("campaign-style.png", "#445566")):
+                path = root / name
+                rendriva.Image.new("RGB", (48, 48), color).save(path)
+                paths.append(str(path))
+            spec = rendriva.normalize_job(
+                base_job(operation="edit", reference_images=paths, product_identity={"required_views": ["front", "back"]})
+            )
+        roles = [asset["role"] for asset in spec["reference_assets"]]
+        self.assertEqual(roles, ["logo", "product", "product", "style"])
+        self.assertEqual(spec["identity_packs"][0]["views"], ["back", "front"])
+        prompt = rendriva.compile_prompt(spec, rendriva.build_plan(spec)[0])
+        self.assertIn("REFERENCE INTELLIGENCE", prompt)
+        self.assertIn("reconcile views back, front", prompt)
+
+    def test_missing_required_identity_view_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            product = Path(temporary) / "shirt-front.png"
+            rendriva.Image.new("RGB", (32, 32), "#222222").save(product)
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(operation="edit", reference_images=[str(product)], product_identity={"required_views": ["front", "back"]}))
+
+    def test_brand_profile_campaign_and_diversity_tokens_are_reusable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            profile_path = Path(temporary) / "shop-brand.json"
+            profile_path.write_text(json.dumps({"palette": ["#123456", "#F5F1EA"], "tone": "calm premium", "fonts": ["Inter", "Manrope"]}), encoding="utf-8")
+            spec = rendriva.normalize_job(base_job(count=3, brand_profile=str(profile_path), campaign={"id": "launch-01", "consistency": "strict"}))
+        plan = rendriva.build_plan(spec)
+        self.assertEqual(spec["brand"]["tone"], "calm premium")
+        self.assertEqual(len(spec["brand"]["profile"]["sha256"]), 64)
+        self.assertEqual({item["campaign_signature"] for item in plan}, {spec["campaign"]["signature"]})
+        self.assertEqual(len({item["variation_direction"] for item in plan}), 3)
+
+    def test_duplicate_batch_output_fails_diversity_gate(self):
+        spec = rendriva.normalize_job(base_job(count=2, max_repair_attempts=0, diversity={"max_similarity": 0.99}))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), DuplicateProvider())
+        self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "FAILED"])
+        self.assertIn("too similar", manifest["outputs"][1]["quality"]["defects"][-1].lower())
+
+    def test_auto_cutout_shadow_and_source_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product_path = root / "product-white-bg.png"
+            product = rendriva.Image.new("RGB", (120, 160), "white")
+            rendriva.ImageDraw.Draw(product).rectangle((25, 20, 95, 140), fill="#B02030")
+            product.save(product_path)
+            spec = rendriva.normalize_job(base_job(locked_layers=[{"path": str(product_path), "require_alpha": False, "auto_cutout": True, "shadow": True}]))
+            _, manifest = rendriva.execute(spec, root / "runs", rendriva.MockProvider())
+        evidence = manifest["outputs"][0]["locked_layer_composite"]["layers"][0]
+        self.assertTrue(evidence["auto_cutout_applied"])
+        self.assertTrue(evidence["shadow_applied"])
+        self.assertTrue(evidence["source_derived"])
+
+    def test_typography_wraps_and_uses_automatic_contrast(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "dark.png"
+            rendriva.Image.new("RGB", (600, 400), "#111111").save(image_path)
+            result = rendriva.apply_text_layers(image_path, [{"text": "A professionally typeset long marketplace headline", "x": 0.08, "y": 0.08, "max_width": 0.38, "max_height": 0.45, "font_size": "auto", "color": "auto", "style": "headline"}])
+        self.assertTrue(result["layers"][0]["wrapped"])
+        self.assertEqual(result["layers"][0]["color"], "#FFFFFF")
+        self.assertEqual(result["engine"], "rendriva-typography-v1")
+
+    def test_marketplace_mode_uses_only_supplied_conversion_copy(self):
+        spec = rendriva.normalize_job(base_job(marketplace={"goal": "payday-sale", "platform": "Shopee", "price": "₱299", "discount": "20% OFF", "claims": ["Free shipping on eligible orders"]}))
+        prompt = rendriva.compile_prompt(spec, rendriva.build_plan(spec)[0])
+        self.assertIn("₱299", prompt)
+        self.assertIn("20% OFF", prompt)
+        self.assertIn("Never invent a price", prompt)
+        self.assertEqual([layer["text"] for layer in spec["text_layers"]], ["₱299", "20% OFF"])
+
+    def test_platform_export_pack_and_machine_readable_reports(self):
+        spec = rendriva.normalize_job(base_job(platform_exports=["shopee-square", "instagram-story"]))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            for relative, expected in (("platform-exports/image-01-01-shopee-square-1080x1080.png", (1080, 1080)), ("platform-exports/image-01-02-instagram-story-1080x1920.png", (1080, 1920))):
+                with rendriva.Image.open(job_dir / relative) as exported:
+                    self.assertEqual(exported.size, expected)
+            for report in ("brand-profile.json", "reference-fidelity-report.json", "diversity-report.json", "campaign-report.json"):
+                self.assertTrue((job_dir / report).is_file())
+            with zipfile.ZipFile(job_dir / "rendriva-output.zip") as archive:
+                names = set(archive.namelist())
+            self.assertIn("platform-exports/image-01-02-instagram-story-1080x1920.png", names)
+            self.assertEqual(len(manifest["platform_export_pack"]), 2)
+
+    def test_short_provider_batch_marks_missing_outputs_failed(self):
+        spec = rendriva.normalize_job(base_job(count=2, diversity=False))
+        with tempfile.TemporaryDirectory() as temporary:
+            _, manifest = rendriva.execute(spec, Path(temporary), ShortBatchProvider())
+        self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "FAILED"])
+        self.assertIn("only 1 images", manifest["outputs"][1]["error"])
+
+    def test_custom_exports_have_unique_names_and_honor_background(self):
+        spec = rendriva.normalize_job(base_job(platform_exports=[{"preset": "custom", "width": 500, "height": 700, "background": "#FF0000"}, {"preset": "custom", "width": 600, "height": 800, "background": "#00FF00"}]))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            paths = [job_dir / record["file"] for record in manifest["platform_export_pack"]]
+            self.assertEqual(len({path.name for path in paths}), 2)
+            with rendriva.Image.open(paths[0]) as first, rendriva.Image.open(paths[1]) as second:
+                self.assertEqual(first.getpixel((0, 0))[:3], (255, 0, 0))
+                self.assertEqual(second.getpixel((0, 0))[:3], (0, 255, 0))
+
+    def test_relative_font_path_is_resolved_from_job_directory(self):
+        source_font = rendriva.find_default_font()
+        if not source_font:
+            self.skipTest("No system font available")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copy(source_font, root / "brand.ttf")
+            spec = rendriva.normalize_job(base_job(text_layers=[{"text": "Exact", "font_path": "brand.ttf"}]), root)
+        self.assertTrue(Path(spec["text_layers"][0]["font_path"]).is_absolute())
+
+    def test_text_zone_must_stay_inside_canvas(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(text_layers=[{"text": "Off canvas", "x": 0.9, "max_width": 0.4}]))
+
+    def test_required_views_need_product_references_and_valid_names(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(product_identity={"required_views": ["front"]}))
+        with tempfile.TemporaryDirectory() as temporary:
+            product = Path(temporary) / "product-front.png"
+            rendriva.Image.new("RGB", (32, 32), "#222222").save(product)
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(operation="edit", reference_images=[str(product)], product_identity={"required_views": ["inside"]}))
+
+    def test_style_only_reference_is_role_scoped_not_product_locked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            style = Path(temporary) / "campaign-style.png"
+            rendriva.Image.new("RGB", (32, 32), "#556677").save(style)
+            spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(style)]))
+        self.assertEqual(spec["fidelity_mode"], "guided")
+        self.assertFalse(any("fabric weave" in lock for lock in spec["preserve"]))
+        self.assertFalse(spec["protected_reference"])
+
+    def test_disabled_diversity_removes_batch_directions(self):
+        spec = rendriva.normalize_job(base_job(count=2, diversity=False))
+        item = dict(rendriva.build_plan(spec)[0])
+        item["batch_variations"] = True
+        prompt = rendriva.compile_prompt(spec, item)
+        self.assertNotIn("ordered diversity directions", prompt)
+
+    def test_campaign_report_states_verification_scope_honestly(self):
+        spec = rendriva.normalize_job(base_job(count=2))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, _ = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            report = json.loads((job_dir / "campaign-report.json").read_text(encoding="utf-8"))
+        self.assertFalse(report["batch_visual_consistency_verified"])
+        self.assertEqual(report["evidence_scope"], "policy-and-per-output-qa")
 
 
 if __name__ == "__main__":

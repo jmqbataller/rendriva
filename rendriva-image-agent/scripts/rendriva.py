@@ -28,12 +28,32 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from PIL import Image, ImageColor, ImageDraw, ImageFont
+    from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageStat
 except ImportError:  # pragma: no cover - handled with a focused runtime error
-    Image = ImageColor = ImageDraw = ImageFont = None
+    Image = ImageColor = ImageDraw = ImageFilter = ImageFont = ImageStat = None
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from rendriva_advanced import (  # noqa: E402
+    MARKETPLACE_GOALS,
+    build_identity_packs,
+    create_platform_exports,
+    diversity_report,
+    image_similarity,
+    load_brand_profile,
+    normalize_campaign,
+    normalize_diversity,
+    normalize_marketplace,
+    normalize_platform_exports,
+    normalize_reference_assets,
+    reference_fidelity_report,
+    variation_direction,
+)
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -263,7 +283,7 @@ def extract_reference_palette(paths: list[str], max_colors: int = 5) -> list[str
 def normalize_brand(
     value: Any,
     base_dir: Path,
-    references: list[str],
+    reference_assets: list[dict[str, Any]],
     locked_layers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     if value is None:
@@ -288,7 +308,9 @@ def normalize_brand(
     else:
         logo_layers = [layer["path"] for layer in locked_layers if layer["role"] == "logo"]
         other_layers = [layer["path"] for layer in locked_layers if layer["role"] != "logo"]
-        palette_sources = list(dict.fromkeys(logo_layers + references + other_layers))
+        eligible_assets = [asset for asset in reference_assets if asset["use_for_palette"]]
+        eligible_assets.sort(key=lambda asset: (asset["role"] != "logo", -asset["priority"]))
+        palette_sources = list(dict.fromkeys(logo_layers + [asset["path"] for asset in eligible_assets] + other_layers))
 
     auto_value = brand.get("auto_palette_from_references", bool(palette_sources))
     if not isinstance(auto_value, bool):
@@ -326,6 +348,25 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(path_value, str) or not path_value.strip():
             raise ValidationError(f"locked_layers[{index}].path must be a non-empty string.")
         resolved_path = resolve_paths([path_value], base_dir)[0]
+        shadow_value = raw_layer.get("shadow", False)
+        if isinstance(shadow_value, bool):
+            shadow = {"enabled": shadow_value}
+        elif isinstance(shadow_value, dict):
+            shadow = copy.deepcopy(shadow_value)
+            shadow["enabled"] = bool(shadow.get("enabled", True))
+        else:
+            raise ValidationError(f"locked_layers[{index}].shadow must be a boolean or object.")
+        shadow.update(
+            {
+                "opacity": int(shadow.get("opacity", 75)),
+                "blur": int(shadow.get("blur", 24)),
+                "offset_x": int(shadow.get("offset_x", 12)),
+                "offset_y": int(shadow.get("offset_y", 20)),
+                "color": str(shadow.get("color", "#000000")),
+            }
+        )
+        if not 0 <= shadow["opacity"] <= 255 or not 0 <= shadow["blur"] <= 100:
+            raise ValidationError(f"locked_layers[{index}].shadow opacity must be 0..255 and blur must be 0..100.")
         layer = {
             "path": resolved_path,
             "role": str(raw_layer.get("role", "product")),
@@ -335,6 +376,10 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
             "max_height": float(raw_layer.get("max_height", 0.75)),
             "anchor": raw_layer.get("anchor", "center"),
             "require_alpha": bool(raw_layer.get("require_alpha", True)),
+            "auto_cutout": bool(raw_layer.get("auto_cutout", False)),
+            "cutout_tolerance": int(raw_layer.get("cutout_tolerance", 28)),
+            "edge_softness": int(raw_layer.get("edge_softness", 4)),
+            "shadow": shadow,
         }
         if layer["role"] not in {"product", "logo", "artwork", "identity", "protected-asset"}:
             raise ValidationError(
@@ -349,6 +394,12 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
             raise ValidationError(
                 f"locked_layers[{index}].anchor must be top-left, top-center, center, bottom-center, or bottom-right."
             )
+        if not 1 <= layer["cutout_tolerance"] <= 120:
+            raise ValidationError(f"locked_layers[{index}].cutout_tolerance must be from 1 through 120.")
+        if not 0 <= layer["edge_softness"] <= 20:
+            raise ValidationError(f"locked_layers[{index}].edge_softness must be from 0 through 20.")
+        if layer["require_alpha"] and layer["auto_cutout"]:
+            raise ValidationError(f"locked_layers[{index}] cannot require alpha and request auto_cutout at the same time.")
         normalized.append(layer)
     return normalized
 
@@ -367,7 +418,6 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         raise ValidationError("scenes mode requires at least one scene.")
     if mode == "variations" and scenes:
         raise ValidationError("scenes can only be used with mode='scenes'.")
-
     count = raw.get("count", len(scenes) if scenes else 1)
     if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
         raise ValidationError("count must be an integer from 1 through 10.")
@@ -378,8 +428,8 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if preset not in PRESETS:
         raise ValidationError(f"Unknown preset '{preset}'. Choose one of: {', '.join(PRESETS)}.")
     preset_defaults = PRESETS[preset]
-
-    operation = raw.get("operation", "edit" if raw.get("reference_images") else "generate")
+    has_references = bool(raw.get("reference_images") or raw.get("reference_assets"))
+    operation = raw.get("operation", "edit" if has_references else "generate")
     if operation not in VALID_OPERATIONS:
         raise ValidationError(f"operation must be one of: {', '.join(sorted(VALID_OPERATIONS))}.")
 
@@ -397,28 +447,90 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if background == "transparent" and output_format not in {"png", "webp"}:
         raise ValidationError("Transparent output requires PNG or WebP.")
 
-    references = resolve_paths(as_string_list(raw.get("reference_images"), "reference_images"), base_dir)
+    try:
+        reference_assets = normalize_reference_assets(raw.get("reference_images"), raw.get("reference_assets"), base_dir)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    references = [asset["path"] for asset in reference_assets]
     locked_layers = normalize_locked_layers(raw.get("locked_layers"), base_dir)
     if references and locked_layers:
-        raise ValidationError("Use either reference_images for generative fidelity or locked_layers for literal compositing, not both.")
+        raise ValidationError("Use either reference assets for generative fidelity or locked_layers for literal compositing, not both.")
     if locked_layers and operation != "generate":
-        raise ValidationError("locked_layers require operation='generate' because the source pixels are composited after background generation.")
+        raise ValidationError("locked_layers require operation='generate' because source pixels are composited after generation.")
     if operation in {"edit", "variation"} and not references:
         raise ValidationError(f"operation='{operation}' requires at least one reference image.")
 
-    fidelity_mode = str(raw.get("fidelity_mode", "strict" if references or locked_layers else "none"))
+    identity_config = raw.get("product_identity", {})
+    if identity_config is None:
+        identity_config = {}
+    if not isinstance(identity_config, dict):
+        raise ValidationError("product_identity must be an object.")
+    required_views = as_string_list(identity_config.get("required_views"), "product_identity.required_views")
+    try:
+        identity_packs = build_identity_packs(reference_assets, required_views)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    if required_views and not identity_packs:
+        raise ValidationError("product_identity.required_views requires at least one product or identity reference asset.")
+    missing_views = sorted({view for pack in identity_packs for view in pack["missing_required_views"]})
+    if missing_views:
+        raise ValidationError(f"The product identity pack is missing required source views: {', '.join(missing_views)}.")
+
+    protected_reference = any(asset["role"] in {"product", "logo", "identity", "general"} for asset in reference_assets)
+    default_fidelity = "strict" if protected_reference or locked_layers else "guided" if references else "none"
+    fidelity_mode = str(raw.get("fidelity_mode", default_fidelity))
     if fidelity_mode not in VALID_FIDELITY_MODES:
         raise ValidationError(f"fidelity_mode must be one of: {', '.join(sorted(VALID_FIDELITY_MODES))}.")
     if fidelity_mode != "none" and not references and not locked_layers:
-        raise ValidationError("fidelity_mode requires reference_images or locked_layers.")
+        raise ValidationError("fidelity_mode requires reference assets or locked_layers.")
     preserve = as_string_list(raw.get("preserve"), "preserve")
-    if fidelity_mode == "strict":
+    preserve += [lock for asset in reference_assets for lock in asset["preserve"]]
+    if fidelity_mode == "strict" and (protected_reference or locked_layers):
         preserve = list(dict.fromkeys(preserve + STRICT_ASSET_LOCKS))
 
-    brand = normalize_brand(raw.get("brand"), base_dir, references, locked_layers)
-    text_layers = raw.get("text_layers", [])
+    try:
+        profile, profile_evidence = load_brand_profile(raw.get("brand_profile"), base_dir)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    raw_brand = raw.get("brand", {})
+    if raw_brand is None:
+        raw_brand = {}
+    if not isinstance(raw_brand, dict):
+        raise ValidationError("brand must be an object.")
+    merged_brand = {**profile, **copy.deepcopy(raw_brand)}
+    brand = normalize_brand(merged_brand, base_dir, reference_assets, locked_layers)
+    if profile_evidence:
+        brand["profile"] = profile_evidence
+
+    try:
+        marketplace = normalize_marketplace(raw.get("marketplace", raw.get("marketplace_goal")))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    text_layers = copy.deepcopy(raw.get("text_layers", []))
     if not isinstance(text_layers, list) or any(not isinstance(item, dict) for item in text_layers):
         raise ValidationError("text_layers must be a list of objects.")
+    if marketplace["enabled"] and marketplace["auto_text_layers"] and marketplace["exact_copy"]:
+        positions = {"badge": (0.08, 0.08, 34), "discount": (0.08, 0.15, 44), "price": (0.08, 0.24, 70), "original_price": (0.08, 0.34, 32), "cta": (0.08, 0.42, 34), "bundle_count": (0.08, 0.50, 34)}
+        existing = {layer.get("text") for layer in text_layers}
+        for field, text_value in marketplace["exact_copy"].items():
+            if text_value not in existing:
+                x, y, size = positions.get(field, (0.08, 0.58, 32))
+                text_layers.append({"text": text_value, "x": x, "y": y, "max_width": 0.52, "max_height": 0.12, "font_size": size, "color": "auto", "style": "price" if field == "price" else "badge" if field in {"badge", "discount"} else "body"})
+    for index, layer in enumerate(text_layers, start=1):
+        if layer.get("font_path"):
+            font_path = Path(str(layer["font_path"])).expanduser()
+            if not font_path.is_absolute():
+                font_path = (base_dir / font_path).resolve()
+            if not font_path.is_file():
+                raise ValidationError(f"text_layers[{index}].font_path not found: {layer['font_path']}")
+            layer["font_path"] = str(font_path)
+
+    try:
+        diversity = normalize_diversity(raw.get("diversity"), count)
+        campaign = normalize_campaign(raw.get("campaign"), brand, count)
+        platform_exports = normalize_platform_exports(raw.get("platform_exports"))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
 
     max_repairs = raw.get("max_repair_attempts", 1)
     if isinstance(max_repairs, bool) or not isinstance(max_repairs, int) or not 0 <= max_repairs <= 3:
@@ -436,32 +548,21 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         width, height = map(int, normalized_size.split("x"))
         pixels = width * height
         if max(width, height) > 3840 or not 655_360 <= pixels <= 8_294_400:
-            raise ValidationError(
-                "gpt-image-2 custom sizes require a maximum edge of 3840px and 655,360 through 8,294,400 total pixels."
-            )
+            raise ValidationError("gpt-image-2 custom sizes require a maximum edge of 3840px and 655,360 through 8,294,400 total pixels.")
 
     normalized = {
-        "prompt": prompt.strip(),
-        "count": count,
-        "mode": mode,
-        "scenes": scenes,
-        "operation": operation,
-        "preset": preset,
-        "size": normalized_size,
-        "quality": quality,
-        "format": output_format,
-        "background": background,
-        "reference_images": references,
-        "locked_layers": locked_layers,
-        "fidelity_mode": fidelity_mode,
-        "preserve": preserve,
-        "avoid": as_string_list(raw.get("avoid"), "avoid"),
-        "brand": brand,
+        "prompt": prompt.strip(), "count": count, "mode": mode, "scenes": scenes,
+        "operation": operation, "preset": preset, "size": normalized_size, "quality": quality,
+        "format": output_format, "background": background, "reference_images": references,
+        "reference_assets": reference_assets, "identity_packs": identity_packs,
+        "locked_layers": locked_layers, "protected_reference": protected_reference,
+        "fidelity_mode": fidelity_mode, "preserve": preserve,
+        "avoid": as_string_list(raw.get("avoid"), "avoid"), "brand": brand,
+        "campaign": campaign, "diversity": diversity, "platform_exports": platform_exports,
+        "marketplace": marketplace,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
-        "text_safe_mode": bool(raw.get("text_safe_mode", bool(text_layers))),
-        "text_layers": text_layers,
-        "max_repair_attempts": max_repairs,
-        "min_professional_score": float(threshold),
+        "text_safe_mode": bool(raw.get("text_safe_mode", bool(text_layers))), "text_layers": text_layers,
+        "max_repair_attempts": max_repairs, "min_professional_score": float(threshold),
         "image_model": image_model,
         "judge_model": str(raw.get("judge_model", os.environ.get("RENDRIVA_JUDGE_MODEL", DEFAULT_JUDGE_MODEL))),
         "concurrency": concurrency,
@@ -475,7 +576,7 @@ def validate_text_layers(layers: list[dict[str, Any]]) -> None:
         text = layer.get("text")
         if not isinstance(text, str) or not text:
             raise ValidationError(f"text_layers[{index}].text must be a non-empty string.")
-        for key in ("x", "y", "max_width"):
+        for key in ("x", "y", "max_width", "max_height"):
             if key in layer:
                 value = layer[key]
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 1:
@@ -483,8 +584,20 @@ def validate_text_layers(layers: list[dict[str, Any]]) -> None:
         if layer.get("align", "left") not in {"left", "center", "right"}:
             raise ValidationError(f"text_layers[{index}].align must be left, center, or right.")
         font_size = layer.get("font_size", 64)
-        if isinstance(font_size, bool) or not isinstance(font_size, int) or font_size <= 0:
-            raise ValidationError(f"text_layers[{index}].font_size must be a positive integer.")
+        if font_size != "auto" and (isinstance(font_size, bool) or not isinstance(font_size, int) or font_size <= 0):
+            raise ValidationError(f"text_layers[{index}].font_size must be 'auto' or a positive integer.")
+        if layer.get("style", "body") not in {"headline", "subheadline", "body", "price", "badge", "caption"}:
+            raise ValidationError(f"text_layers[{index}].style is not supported.")
+        color = str(layer.get("color", "#111111"))
+        if color != "auto":
+            try:
+                ImageColor.getcolor(color, "RGBA")
+            except (ValueError, TypeError) as exc:
+                raise ValidationError(f"text_layers[{index}].color must be 'auto' or a valid color.") from exc
+        x, y = float(layer.get("x", 0.08)), float(layer.get("y", 0.08))
+        max_width, max_height = float(layer.get("max_width", 0.84)), float(layer.get("max_height", 0.30))
+        if x + max_width > 1 or y + max_height > 1:
+            raise ValidationError(f"text_layers[{index}] text zone must fit fully inside the canvas.")
 
 
 def stable_job_id(spec: dict[str, Any]) -> str:
@@ -511,6 +624,8 @@ def build_plan(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 "repair_attempts": 0,
                 "quality": None,
                 "error": None,
+                "variation_direction": variation_direction(zero_index + 1, spec["diversity"]["axes"]),
+                "campaign_signature": spec["campaign"]["signature"],
             }
         )
     return plan
@@ -566,21 +681,57 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             "Do not claim pixel-identical preservation."
         )
     elif spec["fidelity_mode"] == "strict":
-        strategy = "literal source compositing" if spec["locked_layers"] else "strict reference editing with mandatory comparison QA"
-        fidelity_rule = (
-            f"Use {strategy}. The supplied product, garment, artwork, or logo is authoritative and protected. "
-            "Do not redraw, reinterpret, retouch, recolor, reshape, restyle, retexture, smooth, sharpen, replace, or invent any protected detail. "
-            "Keep fabric weave, fibers, stitching, seams, folds, finish, print, color, silhouette, proportions, labels, and product construction unchanged. "
-            "Keep every logo's exact symbol, lettering, geometry, spacing, color, aspect ratio, and placement unchanged; never approximate it with generated text. "
-            "If the requested transformation conflicts with a protected asset, preserve the asset and modify only the background, staging, lighting environment, layout, or unprotected region."
+        if spec["protected_reference"] or spec["locked_layers"]:
+            strategy = "literal source compositing" if spec["locked_layers"] else "strict reference editing with mandatory comparison QA"
+            fidelity_rule = (
+                f"Use {strategy}. The supplied product, garment, artwork, or logo is authoritative and protected. "
+                "Do not redraw, reinterpret, retouch, recolor, reshape, restyle, retexture, smooth, sharpen, replace, or invent any protected detail. "
+                "Keep fabric weave, fibers, stitching, seams, folds, finish, print, color, silhouette, proportions, labels, and product construction unchanged. "
+                "Keep every logo's exact symbol, lettering, geometry, spacing, color, aspect ratio, and placement unchanged; never approximate it with generated text. "
+                "If the requested transformation conflicts with a protected asset, preserve the asset and modify only the background, staging, lighting environment, layout, or unprotected region."
+            )
+        else:
+            fidelity_rule = "Apply strict role scoping: each non-product reference controls only its declared style, layout, lighting, background, typography, or palette dimension. No product or logo lock is implied."
+    reference_intelligence = "No reference assets supplied."
+    if spec["reference_assets"]:
+        role_lines = [
+            f"{Path(asset['path']).name}: role={asset['role']}, view={asset['view']}, identity={asset['identity_id'] or 'not-applicable'}, role-source={asset['role_source']}"
+            for asset in spec["reference_assets"]
+        ]
+        reference_intelligence = (
+            "Use each reference only for its assigned role. Product/identity references control protected identity; logo references control exact brand marks; "
+            "style/layout/lighting/background/typography references guide only that named dimension. Never let a style reference overwrite product construction or logo geometry.\n"
+            + "\n".join(role_lines)
+        )
+    identity_intelligence = "No multi-view identity pack supplied."
+    if spec["identity_packs"]:
+        identity_intelligence = "\n".join(
+            f"Identity {pack['identity_id']} ({pack['identity_signature']}): reconcile views {', '.join(pack['views'])} as one unchanged product; never blend it with another identity."
+            for pack in spec["identity_packs"]
+        )
+    campaign = spec["campaign"]
+    campaign_rule = (
+        f"Campaign {campaign['id']} uses {campaign['consistency']} consistency and token signature {campaign['signature']}. "
+        f"Keep these fixed across outputs: {json.dumps(campaign['tokens'], ensure_ascii=False, sort_keys=True)}."
+        if campaign["enabled"] else "No cross-output campaign lock is required."
+    )
+    marketplace = spec["marketplace"]
+    marketplace_rule = "Marketplace conversion mode is disabled."
+    if marketplace["enabled"]:
+        marketplace_rule = (
+            f"Platform: {marketplace['platform']}; goal: {marketplace['goal']}. {marketplace['direction']} "
+            f"Exact supplied copy only: {json.dumps(marketplace['exact_copy'], ensure_ascii=False, sort_keys=True)}. "
+            f"Allowed supplied claims only: {_join(marketplace['claims'])}. Never invent a price, discount, bundle item, rating, guarantee, urgency claim, badge, credential, or CTA."
         )
     if item.get("batch_variations"):
-        scene = (
-            f"Create {spec['count']} independent professional variations across the provider response. "
-            "Every returned item must remain one standalone image."
-        )
+        scene = f"Create {spec['count']} independent professional variations across the provider response. Every returned item must remain one standalone image."
+        if spec["diversity"]["enabled"]:
+            directions = [f"output {index}: {variation_direction(index, spec['diversity']['axes'])}" for index in range(1, spec["count"] + 1)]
+            scene += " Use these ordered diversity directions: " + "; ".join(directions)
     else:
         scene = item.get("scene") or f"Create an independent professional variation {item['index']} of {spec['count']}."
+        if spec["diversity"]["enabled"]:
+            scene += f" Mandatory diversity direction: {item['variation_direction']}."
     repair_block = ""
     if repair:
         defects = repair.get("defects") or [repair.get("reason", "The previous output failed quality review.")]
@@ -614,6 +765,18 @@ Do not invent product features, logos, wording, accessories, achievements, or br
 
 REFERENCE FIDELITY POLICY ({spec['fidelity_mode'].upper()}):
 {fidelity_rule}
+
+REFERENCE INTELLIGENCE:
+{reference_intelligence}
+
+MULTI-VIEW PRODUCT IDENTITY:
+{identity_intelligence}
+
+CAMPAIGN CONSISTENCY:
+{campaign_rule}
+
+MARKETPLACE CONVERSION MODE:
+{marketplace_rule}
 
 SOURCE COMPOSITE POLICY:
 {locked_layer_rule}
@@ -756,11 +919,15 @@ class OpenAIProvider:
             content.append(
                 {
                     "type": "input_text",
-                    "text": "The next image or images are authoritative source references. Compare identity, color, materials, proportions, artwork, logos, and every stated preservation lock against them.",
+                    "text": "The next image or images are role-scoped source references. Compare only the dimension declared before each image. Product/logo/identity sources control protected identity and materials; style/layout/lighting/background/typography/palette sources must not be treated as product identity.",
                 }
             )
+            role_lookup = {asset["path"]: asset for asset in spec.get("reference_assets", [])}
             for reference in judge_references:
                 reference_path = Path(reference)
+                asset = role_lookup.get(reference)
+                if asset:
+                    content.append({"type": "input_text", "text": f"Reference role={asset['role']}; view={asset['view']}; identity={asset['identity_id'] or 'not-applicable'}."})
                 reference_mime = mimetypes.guess_type(reference_path.name)[0] or "image/png"
                 reference_url = f"data:{reference_mime};base64,{base64.b64encode(reference_path.read_bytes()).decode()}"
                 content.append({"type": "input_image", "image_url": reference_url})
@@ -832,7 +999,7 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
     fidelity_gate = "No reference-fidelity gate applies."
     if spec["fidelity_mode"] == "guided":
         fidelity_gate = "Assess reference similarity as guidance and report material drift, but do not require literal source identity."
-    elif spec["fidelity_mode"] == "strict":
+    elif spec["fidelity_mode"] == "strict" and (spec["protected_reference"] or spec["locked_layers"]):
         fidelity_gate = (
             "STRICT SOURCE-ASSET GATE: mark reference_preservation false and fail the gates for any change to product silhouette, proportions, construction, fabric weave, fibers, texture, finish, stitching, seams, folds, print, color, label, or logo. "
             "A logo fails for altered symbol geometry, lettering, spelling, spacing, color, aspect ratio, placement, cropping, distortion, redraw, or generated approximation. "
@@ -845,6 +1012,17 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
             "Judge whether unprotected backgrounds, accents, typography, and design elements use this palette coherently. "
             "Penalize unrelated dominant colors, but do not require or permit recoloring any protected source asset."
         )
+    campaign_gate = ""
+    if spec["campaign"]["enabled"]:
+        campaign_gate = (
+            f"CAMPAIGN GATE: preserve campaign token signature {spec['campaign']['signature']} and its palette, typography direction, logo safe-zone behavior, grid, and spacing system while still making this output compositionally distinct."
+        )
+    marketplace_gate = ""
+    if spec["marketplace"]["enabled"]:
+        marketplace_gate = (
+            f"MARKETPLACE TRUTH GATE: exact allowed copy is {json.dumps(spec['marketplace']['exact_copy'], ensure_ascii=False, sort_keys=True)} and allowed claims are {_join(spec['marketplace']['claims'])}. "
+            "Fail instruction following or text correctness for any invented price, discount, rating, guarantee, bundle content, badge, credential, or urgency claim."
+        )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
@@ -855,6 +1033,10 @@ Fail the gates if the image is a collage/grid/multi-panel output, misses require
 {fidelity_gate}
 
 {palette_gate}
+
+{campaign_gate}
+
+{marketplace_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -881,21 +1063,75 @@ def find_default_font() -> str | None:
     return next((path for path in candidates if Path(path).is_file()), None)
 
 
-def fit_text(draw: Any, text: str, font_path: str | None, requested_size: int, max_width: int) -> tuple[Any, int, bool]:
-    size = requested_size
-    fallback = False
-    while size >= 10:
+def _load_font(font_path: str | None, size: int) -> tuple[Any, bool]:
+    try:
+        return (ImageFont.truetype(font_path, size), False) if font_path else (ImageFont.truetype(find_default_font(), size), True)
+    except (OSError, TypeError):
         try:
-            font = ImageFont.truetype(font_path, size) if font_path else ImageFont.truetype(find_default_font(), size)
-            fallback = not bool(font_path)
-        except (OSError, TypeError):
-            font = ImageFont.load_default(size=size)
-            fallback = True
-        bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=max(4, size // 5))
-        if bbox[2] - bbox[0] <= max_width:
-            return font, size, fallback
+            return ImageFont.load_default(size=size), True
+        except TypeError:  # older Pillow
+            return ImageFont.load_default(), True
+
+
+def _wrap_text(draw: Any, text: str, font: Any, max_width: int, spacing: int) -> str:
+    paragraphs = text.splitlines() or [text]
+    wrapped: list[str] = []
+    for paragraph in paragraphs:
+        words = paragraph.split()
+        if not words:
+            wrapped.append("")
+            continue
+        line = words[0]
+        for word in words[1:]:
+            candidate = f"{line} {word}"
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                line = candidate
+            else:
+                wrapped.append(line)
+                line = word
+        wrapped.append(line)
+    return "\n".join(wrapped)
+
+
+def fit_text(
+    draw: Any,
+    text: str,
+    font_path: str | None,
+    requested_size: int | str,
+    max_width: int,
+    max_height: int | None = None,
+) -> tuple[Any, int, bool, str]:
+    size = 96 if requested_size == "auto" else int(requested_size)
+    while size >= 10:
+        font, fallback = _load_font(font_path, size)
+        spacing = max(4, size // 5)
+        rendered = _wrap_text(draw, text, font, max_width, spacing)
+        bbox = draw.multiline_textbbox((0, 0), rendered, font=font, spacing=spacing)
+        fits_height = max_height is None or bbox[3] - bbox[1] <= max_height
+        if bbox[2] - bbox[0] <= max_width and fits_height:
+            return font, size, fallback, rendered
         size -= 2
-    raise RendrivaError(f"Text layer cannot fit within {max_width}px: {text[:80]}")
+    raise RendrivaError(f"Text layer cannot fit within {max_width}px and {max_height or 'unlimited'}px height: {text[:80]}")
+
+
+def auto_cutout_background(image: Any, tolerance: int = 28, edge_softness: int = 4) -> Any:
+    """Remove a corner-matched flat background while preserving foreground RGB pixels."""
+    rgba = image.convert("RGBA")
+    corners = [rgba.getpixel((0, 0))[:3], rgba.getpixel((rgba.width - 1, 0))[:3], rgba.getpixel((0, rgba.height - 1))[:3], rgba.getpixel((rgba.width - 1, rgba.height - 1))[:3]]
+    background = tuple(round(sum(pixel[channel] for pixel in corners) / len(corners)) for channel in range(3))
+    pixels = []
+    ramp = max(1, edge_softness * 8)
+    source_pixels = rgba.get_flattened_data() if hasattr(rgba, "get_flattened_data") else rgba.getdata()
+    for red, green, blue, alpha in source_pixels:
+        distance = ((red - background[0]) ** 2 + (green - background[1]) ** 2 + (blue - background[2]) ** 2) ** 0.5
+        cutout_alpha = max(0, min(255, round((distance - tolerance) * 255 / ramp)))
+        pixels.append((red, green, blue, min(alpha, cutout_alpha)))
+    rgba.putdata(pixels)
+    if edge_softness:
+        alpha = rgba.getchannel("A").filter(ImageFilter.GaussianBlur(edge_softness / 2))
+        rgba.putalpha(alpha)
+    return rgba
 
 
 def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[str, Any]:
@@ -914,6 +1150,9 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
                     f"Locked layer requires a transparent source image but has no alpha channel: {layer['path']}"
                 )
             foreground = layer_source.convert("RGBA")
+            cutout_applied = bool(layer["auto_cutout"] and not has_alpha)
+            if cutout_applied:
+                foreground = auto_cutout_background(foreground, layer["cutout_tolerance"], layer["edge_softness"])
         max_width = max(1, int(layer["max_width"] * canvas.width))
         max_height = max(1, int(layer["max_height"] * canvas.height))
         scale = min(max_width / foreground.width, max_height / foreground.height)
@@ -932,6 +1171,17 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
         x, y = anchor_x + offset_x, anchor_y + offset_y
         if x < 0 or y < 0 or x + target[0] > canvas.width or y + target[1] > canvas.height:
             raise RendrivaError(f"Locked layer placement falls outside the canvas: {layer['path']}")
+        shadow = layer["shadow"]
+        if shadow["enabled"]:
+            shadow_color = ImageColor.getcolor(shadow["color"], "RGBA")
+            alpha = foreground.getchannel("A").point(lambda value: round(value * shadow["opacity"] / 255))
+            if shadow["blur"]:
+                alpha = alpha.filter(ImageFilter.GaussianBlur(shadow["blur"]))
+            shadow_image = Image.new("RGBA", foreground.size, (*shadow_color[:3], 0))
+            shadow_image.putalpha(alpha)
+            shadow_canvas = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+            shadow_canvas.paste(shadow_image, (x + shadow["offset_x"], y + shadow["offset_y"]), shadow_image)
+            canvas = Image.alpha_composite(canvas, shadow_canvas)
         canvas.alpha_composite(foreground, dest=(x, y))
         applied.append(
             {
@@ -941,6 +1191,8 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
                 "position": [x, y],
                 "size": [target[0], target[1]],
                 "source_alpha": has_alpha,
+                "auto_cutout_applied": cutout_applied,
+                "shadow_applied": bool(shadow["enabled"]),
                 "source_derived": True,
                 "generatively_redrawn": False,
             }
@@ -967,18 +1219,33 @@ def apply_text_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[st
         canvas = source.convert("RGBA")
     draw = ImageDraw.Draw(canvas)
     used_fallback = False
+    applied_layers: list[dict[str, Any]] = []
     for layer in layers:
         x = int(float(layer.get("x", 0.08)) * canvas.width)
         y = int(float(layer.get("y", 0.08)) * canvas.height)
         max_width = int(float(layer.get("max_width", 0.84)) * canvas.width)
+        max_height = int(float(layer.get("max_height", 0.30)) * canvas.height)
         font_path = layer.get("font_path")
         if font_path:
             font_path = str(Path(font_path).expanduser().resolve())
             if not Path(font_path).is_file():
                 raise RendrivaError(f"Font file not found: {font_path}")
-        font, actual_size, fallback = fit_text(draw, layer["text"], font_path, int(layer.get("font_size", 64)), max_width)
+        font, actual_size, fallback, rendered_text = fit_text(
+            draw,
+            layer["text"],
+            font_path,
+            layer.get("font_size", 64),
+            max_width,
+            max_height,
+        )
         used_fallback = used_fallback or fallback
-        color = ImageColor.getcolor(str(layer.get("color", "#111111")), "RGBA")
+        requested_color = str(layer.get("color", "#111111"))
+        if requested_color == "auto":
+            sample = canvas.crop((x, y, min(canvas.width, x + max_width), min(canvas.height, y + max_height))).convert("RGB")
+            mean = ImageStat.Stat(sample).mean if sample.width and sample.height else [255, 255, 255]
+            luminance = 0.2126 * mean[0] + 0.7152 * mean[1] + 0.0722 * mean[2]
+            requested_color = "#FFFFFF" if luminance < 145 else "#111111"
+        color = ImageColor.getcolor(requested_color, "RGBA")
         align = layer.get("align", "left")
         anchor = {"left": "la", "center": "ma", "right": "ra"}[align]
         if align == "center":
@@ -987,7 +1254,7 @@ def apply_text_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[st
             x += max_width
         draw.multiline_text(
             (x, y),
-            layer["text"],
+            rendered_text,
             font=font,
             fill=color,
             anchor=anchor,
@@ -996,12 +1263,25 @@ def apply_text_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[st
             stroke_width=int(layer.get("stroke_width", 0)),
             stroke_fill=ImageColor.getcolor(str(layer.get("stroke_color", "#000000")), "RGBA"),
         )
+        applied_layers.append(
+            {
+                "text": layer["text"],
+                "rendered_text": rendered_text,
+                "wrapped": rendered_text != layer["text"],
+                "style": layer.get("style", "body"),
+                "font_size": actual_size,
+                "color": requested_color,
+                "font_fallback": fallback,
+                "position": [x, y],
+                "max_size": [max_width, max_height],
+            }
+        )
     output_format = image_path.suffix.lower().lstrip(".")
     if output_format in {"jpg", "jpeg"}:
         canvas.convert("RGB").save(image_path, format="JPEG", quality=95)
     else:
         canvas.save(image_path, format=output_format.upper())
-    return {"applied": True, "font_fallback": used_fallback}
+    return {"applied": True, "font_fallback": used_fallback, "layers": applied_layers, "engine": "rendriva-typography-v1"}
 
 
 def structural_review(spec: dict[str, Any], image_path: Path) -> dict[str, Any]:
@@ -1048,7 +1328,7 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
         }
     if vision is None:
         strict_reference_unverified = (
-            spec["fidelity_mode"] == "strict" and bool(spec["reference_images"]) and not spec["locked_layers"]
+            spec["fidelity_mode"] == "strict" and spec["protected_reference"] and bool(spec["reference_images"]) and not spec["locked_layers"]
         )
         if strict_reference_unverified:
             return {
@@ -1073,7 +1353,7 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
     values = [float(scores.get(name, 0)) for name in SCORED_DIMENSIONS]
     average = sum(values) / len(values)
     gates = bool(vision.get("gates_pass")) and not bool(vision.get("collage_violation"))
-    if spec["fidelity_mode"] == "strict" and (spec["reference_images"] or spec["locked_layers"]):
+    if spec["fidelity_mode"] == "strict" and (spec["protected_reference"] or spec["locked_layers"]):
         gates = gates and bool(vision.get("reference_preservation"))
     passed = gates and average >= spec["min_professional_score"]
     defects.extend(str(value) for value in vision.get("defects", []))
@@ -1121,6 +1401,31 @@ def review_image(context: RunContext, item: dict[str, Any], prompt: str, image_p
     return finalize_review(context.spec, structural, vision)
 
 
+def apply_diversity_gate(context: RunContext, item: dict[str, Any], image_path: Path, review: dict[str, Any]) -> dict[str, Any]:
+    policy = context.spec["diversity"]
+    if not review.get("passed") or not policy["enabled"] or policy["allow_repeats"]:
+        return review
+    with context.lock:
+        candidates = [
+            (other["index"], context.job_dir / other["file"])
+            for other in context.manifest["outputs"]
+            if other["index"] != item["index"] and other["status"] == "PASS" and (context.job_dir / other["file"]).is_file()
+        ]
+    comparisons = [{"index": index, "similarity": image_similarity(image_path, path)} for index, path in candidates]
+    nearest = max(comparisons, key=lambda value: value["similarity"], default=None)
+    review["diversity"] = {"threshold": policy["max_similarity"], "comparisons": comparisons, "nearest": nearest}
+    if nearest and nearest["similarity"] > policy["max_similarity"]:
+        review["passed"] = False
+        review.setdefault("defects", []).append(
+            f"Output is too similar to image {nearest['index']:02d} ({nearest['similarity']:.4f} > {policy['max_similarity']:.4f})."
+        )
+        review["repair_prompt"] = (
+            f"Create a materially different standalone composition using this variation direction: {item['variation_direction']}. "
+            "Change camera, composition, negative-space placement, lighting, and background while preserving all identity and campaign locks."
+        )
+    return review
+
+
 def process_item(
     context: RunContext,
     item: dict[str, Any],
@@ -1145,7 +1450,7 @@ def process_item(
         item["status"] = "JUDGING"
         context.persist()
         context.progress(f"Image {item['index']}/{spec['count']} — judging")
-        review = review_image(context, item, prompt, image_path)
+        review = apply_diversity_gate(context, item, image_path, review_image(context, item, prompt, image_path))
         item["quality"] = review
         if review["passed"]:
             item["status"] = "PASS"
@@ -1166,7 +1471,7 @@ def process_item(
             save_image(repair_path, repaired)
             locked_composite = apply_locked_layers(repair_path, spec["locked_layers"])
             overlay = apply_text_layers(repair_path, spec["text_layers"])
-            repaired_review = review_image(context, item, repair_prompt, repair_path)
+            repaired_review = apply_diversity_gate(context, item, repair_path, review_image(context, item, repair_prompt, repair_path))
             item.setdefault("repair_history", []).append(
                 {
                     "attempt": item["repair_attempts"],
@@ -1218,8 +1523,21 @@ def run_generation(context: RunContext) -> None:
                 item["error"] = str(exc)
             context.persist()
             return
+        if len(payloads) > len(items):
+            error = f"Provider returned {len(payloads)} images for {len(items)} planned outputs."
+            for item in items:
+                item["status"] = "FAILED"
+                item["error"] = error
+            context.persist()
+            return
         for item, payload in zip(items, payloads):
             process_item(context, item, initial_bytes=payload, actual_prompt=common_prompt)
+        if len(payloads) < len(items):
+            error = f"Provider returned only {len(payloads)} images for {len(items)} planned outputs."
+            for item in items[len(payloads) :]:
+                item["status"] = "FAILED"
+                item["error"] = error
+            context.persist()
         return
 
     with ThreadPoolExecutor(max_workers=spec["concurrency"], thread_name_prefix="rendriva") as executor:
@@ -1254,6 +1572,30 @@ def quality_report(manifest: dict[str, Any]) -> dict[str, Any]:
 def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
     report_path = job_dir / "quality-report.json"
     json_dump(report_path, quality_report(manifest))
+    export_records = create_platform_exports(job_dir, manifest)
+    brand_profile_path = job_dir / "brand-profile.json"
+    json_dump(brand_profile_path, manifest["spec"]["brand"])
+    fidelity_path = job_dir / "reference-fidelity-report.json"
+    json_dump(fidelity_path, reference_fidelity_report(manifest))
+    diversity_path = job_dir / "diversity-report.json"
+    json_dump(diversity_path, diversity_report(job_dir, manifest))
+    campaign_path = job_dir / "campaign-report.json"
+    json_dump(
+        campaign_path,
+        {
+            "job_id": manifest["job_id"],
+            "campaign": manifest["spec"]["campaign"],
+            "evidence_scope": "policy-and-per-output-qa",
+            "batch_visual_consistency_verified": False,
+            "verification_note": "This report proves shared campaign tokens and per-output QA instructions. It does not claim a separate cross-output vision comparison.",
+            "outputs": [
+                {"index": item["index"], "file": item["file"], "status": item["status"], "campaign_signature": item["campaign_signature"]}
+                for item in manifest["outputs"]
+            ],
+        },
+    )
+    manifest["platform_export_pack"] = export_records
+    json_dump(job_dir / "manifest.json", manifest)
     archive_path = job_dir / "rendriva-output.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for item in manifest["outputs"]:
@@ -1261,8 +1603,12 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
                 image_path = job_dir / item["file"]
                 if image_path.is_file():
                     archive.write(image_path, arcname=image_path.name)
-        archive.write(job_dir / "manifest.json", arcname="manifest.json")
-        archive.write(report_path, arcname="quality-report.json")
+        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path):
+            archive.write(path, arcname=path.name)
+        export_root = job_dir / "platform-exports"
+        if export_root.is_dir():
+            for path in sorted(export_root.glob("*.png")):
+                archive.write(path, arcname=str(path.relative_to(job_dir)))
     return archive_path
 
 
@@ -1291,6 +1637,12 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
             "source": spec["brand"].get("palette_source", "none"),
             "sources": spec["brand"].get("palette_sources", []),
         },
+        "reference_intelligence": {
+            "assets": spec["reference_assets"],
+            "identity_packs": spec["identity_packs"],
+        },
+        "campaign": spec["campaign"],
+        "marketplace": spec["marketplace"],
         "spec": spec,
         "outputs": build_plan(spec),
     }
@@ -1352,10 +1704,19 @@ class MockProvider:
         images = []
         for index in range(n):
             mode = "RGBA" if spec["background"] == "transparent" else "RGB"
-            color = (238, 235, 227, 0) if mode == "RGBA" else (238, 235, 227)
+            prompt_seed = int(hashlib.sha256(f"{prompt}|{index}".encode()).hexdigest()[:8], 16)
+            shift_x = ((index % 5) - 2) * int(size[0] * 0.055)
+            shift_y = ((index // 5) - 1) * int(size[1] * 0.055)
+            neutral = 225 + (prompt_seed % 20)
+            color = (neutral, max(0, neutral - 3), max(0, neutral - 11), 0) if mode == "RGBA" else (neutral, max(0, neutral - 3), max(0, neutral - 11))
             image = Image.new(mode, size, color)
             draw = ImageDraw.Draw(image)
-            draw.rectangle((size[0] * 0.2, size[1] * 0.2, size[0] * 0.8, size[1] * 0.8), fill=(40, 40, 45, 255) if mode == "RGBA" else (40, 40, 45))
+            left = int(size[0] * 0.16) + shift_x
+            top = int(size[1] * (0.18 + (index % 3) * 0.025)) + shift_y
+            right = int(size[0] * (0.72 + (index % 4) * 0.045)) + shift_x
+            bottom = int(size[1] * 0.80) + shift_y
+            accent = (30 + prompt_seed % 55, 35 + (prompt_seed >> 5) % 45, 45 + (prompt_seed >> 10) % 55)
+            draw.rounded_rectangle((left, top, right, bottom), radius=max(8, size[0] // 40), fill=(*accent, 255) if mode == "RGBA" else accent)
             stream = io.BytesIO()
             target_format = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}[spec["format"]]
             if target_format == "JPEG" and mode == "RGBA":

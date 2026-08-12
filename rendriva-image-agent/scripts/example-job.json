@@ -12,6 +12,24 @@
   "format": "png",
   "size": "1024x1024",
   "professional_designer_mode": true,
+  "campaign": {
+    "id": "bottle-launch",
+    "consistency": "strict",
+    "grid": "8-point modular grid"
+  },
+  "diversity": {
+    "enabled": true,
+    "max_similarity": 0.992
+  },
+  "marketplace": {
+    "platform": "general-marketplace",
+    "goal": "product-hero"
+  },
+  "platform_exports": [
+    "shopee-square",
+    "instagram-post",
+    "instagram-story"
+  ],
   "preserve": [
     "matte black finish",
     "cylindrical silhouette",

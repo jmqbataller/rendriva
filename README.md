@@ -6,16 +6,16 @@ Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image
 
 ## Download for ChatGPT Skills
 
-[Download Rendriva ChatGPT Skill v1.2.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.2.0.zip)
+[Download Rendriva ChatGPT Skill v1.3.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.3.0.zip)
 
 This upload-ready ZIP has `SKILL.md` at the archive root.
 
 1. Download the ZIP.
 2. Open the ChatGPT Skills upload flow.
-3. Select `rendriva-chatgpt-skill-v1.2.0.zip`.
+3. Select `rendriva-chatgpt-skill-v1.3.0.zip`.
 4. Review the skill details, then confirm the upload.
 
-Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.2.0.zip.sha256)
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.3.0.zip.sha256)
 
 ## What Rendriva does
 
@@ -23,18 +23,18 @@ Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.2.0.zip.sha25
 - Supports **Variation Batch** and **Scene List** modes
 - Prevents accidental collages, grids, contact sheets, and multi-panel canvases
 - Applies professional art direction instead of generic AI-template styling
-- Judges every output independently for instructions, composition, hierarchy, brand consistency, realism, artifacts, and commercial usability
-- Repairs only the failed image while preserving passing outputs
-- Compares generated outputs with supplied reference images
-- Automatically extracts the default shop/brand palette from any supplied reference image
-- Combines distinct colors from multiple references and prioritizes an identified logo
-- Applies reference-derived colors to backgrounds, accents, typography, and design elements without recoloring protected assets
-- Defaults supplied product and logo references to strict fidelity
-- Protects fabric weave, texture, stitching, construction, print, color, proportions, labels, and exact logo geometry
-- Supports source-derived `locked_layers` for transparent products, artwork, and logos that must not be redrawn
-- Records locked-asset roles and SHA-256 source fingerprints in the manifest
-- Adds critical poster and advertisement copy programmatically for exact spelling
-- Produces individual files, `manifest.json`, `quality-report.json`, and `rendriva-output.zip`
+- Interprets reference images as product, logo, identity, palette, style, layout, lighting, background, or typography sources
+- Combines front, back, side, and detail references into a multi-view product identity lock
+- Automatically derives the shop palette from supplied reference images and prioritizes the logo
+- Protects product fabric, weave, texture, stitching, construction, print, color, labels, and exact logo geometry
+- Keeps campaign palette, typography, grid, spacing, and logo zones consistent across a batch
+- Gives each batch output a distinct camera, composition, lighting, background, and negative-space direction
+- Rejects near-duplicate outputs and repairs only the failed image
+- Supports source-derived product cutout, natural shadow, and locked logo/product compositing
+- Applies exact typography with automatic sizing, wrapping, and black/white contrast
+- Adds only supplied marketplace prices, discounts, bundles, CTAs, and claims
+- Creates separate contain-scaled Shopee, Instagram, Facebook, website, and TikTok exports
+- Produces reusable brand, fidelity, diversity, campaign, quality, and manifest reports
 - Preserves partial success and resumes interrupted jobs without repeating completed images
 
 ## Production presets
@@ -55,6 +55,7 @@ Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.2.0.zip.sha25
 ```text
 rendriva/
 ├── README.md
+├── dist/
 └── rendriva-image-agent/
     ├── SKILL.md
     ├── agents/openai.yaml
@@ -93,17 +94,13 @@ python rendriva-image-agent/scripts/rendriva.py \
   --dry-run
 ```
 
-Run the job:
+Run or resume a job:
 
 ```bash
 python rendriva-image-agent/scripts/rendriva.py \
   rendriva-image-agent/scripts/example-job.json \
   --output ./rendriva-runs
-```
 
-Resume an interrupted job:
-
-```bash
 python rendriva-image-agent/scripts/rendriva.py \
   rendriva-image-agent/scripts/example-job.json \
   --output ./rendriva-runs \
@@ -112,29 +109,30 @@ python rendriva-image-agent/scripts/rendriva.py \
 
 ## Output contract
 
-A request for ten images produces:
+A request for ten images produces separate `image-01.png` through `image-10.png` files. A production package can also contain:
 
 ```text
-image-01.png
-image-02.png
-...
-image-10.png
 manifest.json
 quality-report.json
+brand-profile.json
+reference-fidelity-report.json
+diversity-report.json
+campaign-report.json
+platform-exports/*.png
 rendriva-output.zip
 ```
 
-Rendriva never combines those ten requested outputs into one collage unless the user explicitly requests a collage.
+Rendriva never combines the requested outputs into one collage unless the user explicitly requests that composition.
 
 ## Professional Designer Mode
 
-Professional Designer Mode is enabled by default. It converts a simple prompt into an intentional creative brief covering purpose, audience, focal point, grid, hierarchy, spacing, palette, typography, lighting, material behavior, reference locks, prohibited elements, and output specifications.
+Professional Designer Mode is enabled by default. It converts a simple prompt into an intentional creative brief covering purpose, audience, focal point, grid, hierarchy, spacing, palette, typography, lighting, material behavior, reference roles, product identity locks, prohibited elements, and output specifications.
 
 The quality judge requires all non-negotiable gates to pass and a professional-design average of at least 4/5 by default.
 
 ## Reference accuracy
 
-Reference images now automatically define the default brand palette unless an explicit palette is supplied. With multiple references, Rendriva combines distinct dominant colors and prioritizes an identified logo; the palette applies only to unprotected design elements. Reference jobs also default to strict fidelity. Any visible drift in product material, fabric texture, stitching, construction, print, color, label, proportions, or logo geometry fails the quality gate. Generative editing remains high fidelity rather than pixel-identical; for literal preservation, supply transparent product and logo assets through `locked_layers` so Rendriva generates only the surrounding design and composites the source-derived assets afterward.
+Reference jobs default to strict fidelity. Generative editing remains high fidelity rather than pixel-identical. For literal source preservation, use `locked_layers`; Rendriva generates only the surrounding design, derives alpha from a simple flat background when requested, and composites the source-derived product or logo afterward. When a requested angle exposes unseen construction, supply the matching reference view rather than asking the system to invent it.
 
 ## Security
 
@@ -145,23 +143,7 @@ Reference images now automatically define the default brand palette unless an ex
 
 ## Validation
 
-The included test suite covers:
-
-- Ten independent outputs
-- No-collage prompt enforcement
-- Scene and variation planning
-- Partial failures
-- Targeted repair
-- Automatic multi-reference palette extraction, logo priority, and manual override
-- Reference-palette-aware design QA and manifest fingerprints
-- Strict product, fabric, texture, and logo fidelity gates
-- Reference-aware judging that cannot pass unverified strict edits
-- Source-fingerprint-aware locked-layer compositing
-- Exact text expectations
-- Resume and duplicate-job protection
-- ZIP packaging
-
-Run it with:
+The 38-test deterministic suite covers separate ten-image output, provider cardinality, no-collage prompts, partial failures, targeted repair, reference roles, multi-view identity, automatic palettes, reusable brand profiles, campaign/diversity controls, duplicate detection, strict fidelity, cutout/shadow evidence, responsive typography, marketplace truth controls, unique platform exports, reporting, resume behavior, and ZIP packaging.
 
 ```bash
 python -m unittest discover -s rendriva-image-agent/scripts/tests -v
@@ -169,4 +151,4 @@ python -m unittest discover -s rendriva-image-agent/scripts/tests -v
 
 ## Status
 
-Rendriva v1.2 is ready for controlled testing with real image-generation credentials. Live output quality still depends on the selected model, references, prompt constraints, and human review for high-stakes brand or product work.
+Rendriva v1.3 is ready for controlled testing with real image-generation credentials. Live output quality still depends on the selected model, reference quality, prompt constraints, and human review for high-stakes brand or product work.

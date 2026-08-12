@@ -10,6 +10,7 @@
 6. Literal source compositing
 7. Exact text layers
 8. Supported fields
+9. Advanced production controls
 
 ## Minimal variation job
 
@@ -161,6 +162,10 @@ Do not combine `locked_layers` and `reference_images` in the current adapter. A 
 
 `x`, `y`, and `max_width` accept normalized values from zero to one. Set `font_path` when an exact brand font is required. Without it, the adapter uses an available default font and reports the fallback in the manifest.
 
+## Advanced production controls
+
+Rendriva 1.3 supports automatic reference roles, multi-view identity packs, batch diversity, campaign locks, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
+
 ## Supported fields
 
 | Field | Values / behavior |
@@ -176,18 +181,27 @@ Do not combine `locked_layers` and `reference_images` in the current adapter. A 
 | `format` | `png`, `jpeg`, or `webp` |
 | `background` | `opaque`, `transparent`, or `auto` |
 | `reference_images` | Local image paths used for edit/reference jobs |
+| `reference_assets` | Role-aware local sources with `path`, `role`, `view`, `identity_id`, and palette controls |
+| `product_identity.required_views` | Views that must exist in the identity pack before generation |
 | `locked_layers` | Transparent source images composited after background generation |
 | `locked_layers[].role` | `product`, `logo`, `artwork`, `identity`, or `protected-asset` |
+| `locked_layers[].auto_cutout` | Derive alpha from a simple corner-matched background when the source has no transparency |
+| `locked_layers[].shadow` | Natural shadow controls: opacity, blur, offsets, and color |
 | `fidelity_mode` | `strict`, `guided`, or `none`; defaults to `strict` when a source asset exists |
 | `preserve` | Non-negotiable details to retain |
 | `avoid` | Additional forbidden visual elements |
 | `brand` | Palette, tone, fonts, references, and avoid list |
+| `brand_profile` | Reusable brand JSON object or local JSON file; job `brand` values override it |
 | `brand.auto_palette_from_references` | Defaults to `true` when any reference or locked layer exists |
 | `brand.palette_source_images` | Optional reference-image paths used specifically for automatic palette extraction |
 | `brand.palette_max_colors` | Extract `1..8` colors; defaults to `5` |
 | `professional_designer_mode` | Defaults to `true` |
 | `text_safe_mode` | Generate without critical text and reserve layout space |
 | `text_layers` | Exact copy applied after generation |
+| `campaign` | Cross-output campaign ID, consistency level, grid, logo position, and shared tokens |
+| `diversity` | Near-duplicate threshold and composition/camera/background variation axes |
+| `platform_exports` | Separate contain-scaled Shopee, Instagram, Facebook, website, or TikTok PNG exports |
+| `marketplace` | Conversion goal plus exact supplied price, discount, CTA, bundle count, and claims |
 | `max_repair_attempts` | Defaults to `1`; capped at `3` |
 | `min_professional_score` | Defaults to `4.0` out of `5` |
 | `judge_model` | Defaults to `RENDRIVA_JUDGE_MODEL` or `gpt-5.5` |
