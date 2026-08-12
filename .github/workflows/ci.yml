@@ -24,14 +24,15 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r rendriva-image-agent/scripts/requirements.txt
       - name: Compile adapter
-        run: python -m py_compile rendriva-image-agent/scripts/rendriva.py rendriva-image-agent/scripts/rendriva_advanced.py
+        run: python -m py_compile rendriva-image-agent/scripts/rendriva.py rendriva-image-agent/scripts/rendriva_advanced.py rendriva-image-agent/scripts/rendriva_commerce.py
       - name: Run tests
         run: python -m unittest discover -s rendriva-image-agent/scripts/tests -v
       - name: Validate example job
         run: python rendriva-image-agent/scripts/rendriva.py rendriva-image-agent/scripts/example-job.json --dry-run
       - name: Verify downloadable skill package
         run: |
-          sha256sum -c dist/rendriva-chatgpt-skill-v1.5.0.zip.sha256
-          unzip -t dist/rendriva-chatgpt-skill-v1.5.0.zip
-          unzip -Z1 dist/rendriva-chatgpt-skill-v1.5.0.zip | grep -qx 'SKILL.md'
-          unzip -p dist/rendriva-chatgpt-skill-v1.5.0.zip scripts/rendriva.py | grep -q 'VERSION = "1.5.0"'
+          sha256sum -c dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256
+          unzip -t dist/rendriva-chatgpt-skill-v1.6.0.zip
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.6.0.zip | grep -qx 'SKILL.md'
+          unzip -p dist/rendriva-chatgpt-skill-v1.6.0.zip scripts/rendriva.py | grep -q 'VERSION = "1.6.0"'
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.6.0.zip | grep -qx 'scripts/rendriva_commerce.py'

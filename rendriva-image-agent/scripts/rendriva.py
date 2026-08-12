@@ -54,9 +54,16 @@ from rendriva_advanced import (  # noqa: E402
     reference_fidelity_report,
     variation_direction,
 )
+from rendriva_commerce import (  # noqa: E402
+    build_commerce_report,
+    build_video_continuity_report,
+    commerce_assignment,
+    normalize_commerce_suite,
+    shot_assignment,
+)
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -556,6 +563,7 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         platform_exports = normalize_platform_exports(raw.get("platform_exports"))
         product_truth_map = normalize_product_truth_map(raw.get("product_truth_map"), reference_assets, locked_layers, base_dir)
         draft_to_final = normalize_draft_to_final(raw.get("draft_to_final"), count)
+        commerce = normalize_commerce_suite(raw, reference_assets, count, preset, base_dir)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -590,6 +598,7 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         "campaign": campaign, "diversity": diversity, "platform_exports": platform_exports,
         "marketplace": marketplace, "product_truth_map": product_truth_map,
         "draft_to_final": draft_to_final, "model_identity_lock": model_identity_lock,
+        **commerce,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
         "text_safe_mode": bool(raw.get("text_safe_mode", bool(text_layers))), "text_layers": text_layers,
         "max_repair_attempts": max_repairs, "min_professional_score": float(threshold),
@@ -644,6 +653,8 @@ def build_plan(spec: dict[str, Any]) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
     for zero_index in range(spec["count"]):
         scene = spec["scenes"][zero_index] if spec["mode"] == "scenes" else None
+        sku_assignment = commerce_assignment(spec, zero_index + 1)
+        shot = shot_assignment(spec, zero_index + 1)
         plan.append(
             {
                 "index": zero_index + 1,
@@ -656,6 +667,8 @@ def build_plan(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 "error": None,
                 "variation_direction": variation_direction(zero_index + 1, spec["diversity"]["axes"]),
                 "campaign_signature": spec["campaign"]["signature"],
+                "sku_assignment": sku_assignment,
+                "shot": shot,
             }
         )
     return plan
@@ -783,6 +796,33 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
                 "Establish exactly one clear, natural, professionally photographed model face for this first approved output. "
                 "This person will become the authoritative identity anchor for every later variant, so avoid an obscured, profile-only, cropped, duplicated, or ambiguous face."
             )
+    assignment = item.get("sku_assignment") or commerce_assignment(spec, item["index"])
+    sku_rule = "SKU Variant Matrix is disabled."
+    if assignment:
+        variant = next(entry for entry in spec["sku_variant_matrix"]["variants"] if entry["id"] == assignment["variant_id"])
+        sku_rule = (
+            f"Use only SKU {variant['id']} ({variant['label']}) from {Path(variant['source_path']).name}; source fingerprint {variant['source_sha256']}; expected color {variant['expected_color']}. "
+            f"Preserve {_join(variant['preserve'])}. Do not swap, blend, duplicate, recolor, or borrow construction from another variant."
+        )
+    garment = spec["garment_construction_lock"]
+    garment_rule = (
+        f"Lock {_join(garment['fields'])}; do not invent unseen construction. "
+        + ("For flat-lays keep the chest completely flat with no padded, molded, mannequin, cup, or body contour." if garment["flat_chest_when_flatlay"] else "")
+        if garment["enabled"] else "Garment Construction Lock is disabled."
+    )
+    visibility = spec["product_visibility_guard"]
+    visibility_rule = (
+        f"Keep at least {visibility['min_visible_ratio']:.0%} of the product visibly judgeable. Protect {_join(visibility['protected_details'])} from {_join(visibility['blockers'])}."
+        if visibility["enabled"] else "Product Visibility Guard is disabled."
+    )
+    color_guard = spec["sku_color_guard"]
+    color_rule = (
+        f"Preserve exact SKU color independently from scene lighting; target ΔE within {color_guard['delta_e_tolerance']:.1f}. Never bake lighting color into product identity."
+        if color_guard["enabled"] else "SKU Color Guard is disabled."
+    )
+    shot_rule = f"Required shot role: {item.get('shot')}. Complete this coverage role without violating identity or product locks." if item.get("shot") else "No formal shot-list role is assigned."
+    defect_entries = spec["defect_memory"].get("entries", [])
+    defect_rule = f"Do not repeat previously rejected campaign defects: {_join(defect_entries)}." if defect_entries else "No prior campaign defects have been recorded."
     if item.get("batch_variations"):
         scene = f"Create {spec['count']} independent professional variations across the provider response. Every returned item must remain one standalone image."
         if spec["diversity"]["enabled"]:
@@ -807,6 +847,11 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             f"Correct these observed defects: {_join([str(value) for value in defects])}.\n"
             f"Use this targeted correction: {repair.get('repair_prompt', 'Correct the defects without changing locked details.')}\n"
         )
+        if spec["localized_repair"]["enabled"]:
+            repair_block += (
+                f"Repair only the smallest affected zone among {_join(spec['localized_repair']['zones'])}. Preserve every passing region. "
+                "Reject and roll back the repair if face, SKU, garment construction, product color, fabric, texture, print, logo, or typography locks drift.\n"
+            )
     return f"""Create ONE standalone image file for this single batch item.
 
 STRICT OUTPUT RULE:
@@ -841,6 +886,24 @@ MULTI-VIEW PRODUCT IDENTITY:
 
 SINGLE MODEL FACE LOCK:
 {model_identity_rule}
+
+SKU VARIANT MATRIX:
+{sku_rule}
+
+GARMENT CONSTRUCTION LOCK:
+{garment_rule}
+
+PRODUCT VISIBILITY GUARD:
+{visibility_rule}
+
+SKU COLOR GUARD:
+{color_rule}
+
+SHOT DIRECTOR:
+{shot_rule}
+
+CAMPAIGN DEFECT MEMORY:
+{defect_rule}
 
 PRODUCT REGION TRUTH MAP:
 {truth_rule}
@@ -1031,6 +1094,29 @@ class OpenAIProvider:
             raise ProviderError(f"Requested {n} identity-locked images but the API returned {len(images)}.")
         return images
 
+    def repair(self, spec: dict[str, Any], prompt: str, failed_path: Path, n: int = 1) -> list[bytes]:
+        fields = {
+            "model": spec["image_model"],
+            "prompt": prompt,
+            "n": str(n),
+            "quality": spec["quality"],
+            "size": spec["size"],
+            "output_format": spec["format"],
+            "background": spec["background"],
+        }
+        sources = [failed_path]
+        identity = spec["model_identity_lock"].get("source_path")
+        if identity:
+            sources.append(Path(identity))
+        sources.extend(Path(path) for path in spec["reference_images"])
+        deduplicated = list(dict.fromkeys(str(path.resolve()) for path in sources))
+        body, content_type = multipart_body(fields, [("image[]", Path(path)) for path in deduplicated])
+        payload = api_request("https://api.openai.com/v1/images/edits", self.api_key, raw_body=body, content_type=content_type)
+        images = extract_images(payload)
+        if len(images) != n:
+            raise ProviderError(f"Requested {n} repaired images but the API returned {len(images)}.")
+        return images
+
     def judge(self, spec: dict[str, Any], image_path: Path, prompt: str) -> dict[str, Any]:
         mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
         image_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode()}"
@@ -1038,7 +1124,8 @@ class OpenAIProvider:
         content: list[dict[str, Any]] = [{"type": "input_text", "text": quality_prompt(spec, prompt)}]
         truth_sources = [region["source_path"] for region in spec["product_truth_map"]["regions"]]
         model_source = spec["model_identity_lock"].get("source_path")
-        judge_references = list(dict.fromkeys(list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]] + truth_sources + ([model_source] if model_source else [])))
+        sku_sources = [assignment["source_path"] for assignment in spec["sku_variant_matrix"]["assignments"]]
+        judge_references = list(dict.fromkeys(list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]] + truth_sources + sku_sources + ([model_source] if model_source else [])))
         if judge_references:
             content.append(
                 {
@@ -1130,6 +1217,13 @@ def quality_schema() -> dict[str, Any]:
             "model_identity_match": {"type": "boolean"},
             "model_identity_confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "model_identity_observations": {"type": "string"},
+            "sku_variant_match": {"type": "boolean"},
+            "garment_construction_match": {"type": "boolean"},
+            "product_visibility_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+            "product_visibility_pass": {"type": "boolean"},
+            "sku_color_match": {"type": "boolean"},
+            "anatomy_quality": {"type": "boolean"},
+            "localized_repair_scope_preserved": {"type": "boolean"},
             "region_fidelity": {
                 "type": "array",
                 "items": {
@@ -1163,6 +1257,13 @@ def quality_schema() -> dict[str, Any]:
             "model_identity_match",
             "model_identity_confidence",
             "model_identity_observations",
+            "sku_variant_match",
+            "garment_construction_match",
+            "product_visibility_ratio",
+            "product_visibility_pass",
+            "sku_color_match",
+            "anatomy_quality",
+            "localized_repair_scope_preserved",
             "region_fidelity",
             "scores",
             "defects",
@@ -1181,6 +1282,10 @@ CAMPAIGN_VISION_DIMENSIONS = [
     "spacing_grid_consistency",
     "diversity_preserved",
     "model_face_consistency",
+    "sku_assignment_consistency",
+    "garment_construction_consistency",
+    "product_visibility_consistency",
+    "sku_color_consistency",
 ]
 
 
@@ -1232,7 +1337,7 @@ TOKEN SIGNATURE: {campaign['signature']}
 TOKENS: {json.dumps(campaign['tokens'], ensure_ascii=False, sort_keys=True)}
 OUTPUT INDICES: {indices}
 
-Verify shared palette logic, typography system, logo treatment and safe-zone behavior, product-scale rhythm, lighting family, spacing/grid logic, and professional finish. Also verify meaningful composition/camera/background diversity; consistency must not become duplication. Product identity and truth-region locks remain non-negotiable.
+Verify shared palette logic, typography system, logo treatment and safe-zone behavior, product-scale rhythm, lighting family, spacing/grid logic, and professional finish. Also verify meaningful composition/camera/background diversity; consistency must not become duplication. Product identity and truth-region locks remain non-negotiable. Verify every output against its recorded SKU assignment, garment construction contract, protected-detail visibility target, and source product color. A consistent-looking batch still fails when variants are swapped, blended, obscured, recolored, or structurally invented.
 
 {model_rule}
 
@@ -1301,6 +1406,13 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
             model_identity_gate = (
                 "SINGLE MODEL FACE ANCHOR GATE: this output establishes the recurring person. Require exactly one clear, natural, unobscured, non-duplicated face suitable as the identity anchor; return model_identity_match=true when usable."
             )
+    commerce_gate = (
+        "COMMERCE QA: compare only the SKU assigned in the brief with its named authoritative source. Set sku_variant_match=false for a swapped, blended, duplicated, or wrong variant. "
+        f"When Garment Construction Lock is enabled ({spec['garment_construction_lock']['enabled']}), verify neckline, sleeves, hem, seams, stitching, pockets, buttons, straps, silhouette, length, fit, print, and labels; never accept invented unseen construction. "
+        f"When Product Visibility Guard is enabled ({spec['product_visibility_guard']['enabled']}), estimate the visible product ratio and require at least {spec['product_visibility_guard']['min_visible_ratio']:.2f}; fail when a protected logo, print, neckline, hem, silhouette, or label is obscured. "
+        f"When SKU Color Guard is enabled ({spec['sku_color_guard']['enabled']}), distinguish lighting from product identity color and reject material color drift beyond the configured tolerance. "
+        "Set anatomy_quality=false for malformed hands, fingers, limbs, face artifacts, or implausible body geometry. For a repair, set localized_repair_scope_preserved=false if previously passing face, product, logo, color, construction, or typography regions changed. Disabled gates return true and visibility ratio 1."
+    )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
@@ -1319,6 +1431,8 @@ Fail the gates if the image is a collage/grid/multi-panel output, misses require
 {truth_gate}
 
 {model_identity_gate}
+
+{commerce_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -1647,6 +1761,28 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
             defects.append(
                 f"Single Model Face Lock failed (match={identity_match}, confidence={identity_confidence:.3f}, required={spec['model_identity_lock']['min_confidence']:.3f})."
             )
+    if spec["sku_variant_matrix"]["enabled"] and not bool(vision.get("sku_variant_match")):
+        gates = False
+        defects.append("The generated product does not match the SKU assigned to this output.")
+    if spec["garment_construction_lock"]["enabled"] and not bool(vision.get("garment_construction_match")):
+        gates = False
+        defects.append("Garment Construction Lock failed.")
+    if spec["product_visibility_guard"]["enabled"]:
+        visible_ratio = float(vision.get("product_visibility_ratio", 0))
+        if not bool(vision.get("product_visibility_pass")) or visible_ratio < spec["product_visibility_guard"]["min_visible_ratio"]:
+            gates = False
+            defects.append(
+                f"Product visibility {visible_ratio:.3f} is below the required {spec['product_visibility_guard']['min_visible_ratio']:.3f} or a protected detail is obscured."
+            )
+    if spec["sku_color_guard"]["enabled"] and not bool(vision.get("sku_color_match")):
+        gates = False
+        defects.append("SKU Color Guard failed; product identity color drifted from its source.")
+    if not bool(vision.get("anatomy_quality", True)):
+        gates = False
+        defects.append("Anatomy QA failed.")
+    if spec["localized_repair"]["enabled"] and not bool(vision.get("localized_repair_scope_preserved", True)):
+        gates = False
+        defects.append("Localized repair changed a previously passing locked region; rollback is required.")
     required_regions = {region["name"] for region in spec["product_truth_map"]["regions"] if region["required"]}
     region_results = {str(result.get("name")): result for result in vision.get("region_fidelity", [])}
     missing_regions = sorted(required_regions - set(region_results))
@@ -1711,17 +1847,48 @@ def model_identity_anchor_path(context: RunContext) -> Path | None:
 
 def runtime_spec_for_item(context: RunContext, item: dict[str, Any]) -> dict[str, Any]:
     anchor_path = model_identity_anchor_path(context)
+    runtime_spec = copy.deepcopy(context.spec)
+    assignment = item.get("sku_assignment")
+    if assignment:
+        assigned_source = assignment["source_path"]
+        product_sources = {
+            asset["path"] for asset in runtime_spec["reference_assets"] if asset["role"] in {"product", "identity"}
+        }
+        runtime_spec["reference_images"] = list(
+            dict.fromkeys([path for path in runtime_spec["reference_images"] if path not in product_sources or path == assigned_source] + [assigned_source])
+        )
+        runtime_spec["reference_assets"] = [
+            asset for asset in runtime_spec["reference_assets"] if asset["role"] not in {"product", "identity"} or asset["path"] == assigned_source
+        ]
+        runtime_spec["product_truth_map"]["regions"] = [
+            region for region in runtime_spec["product_truth_map"]["regions"] if region["source_path"] not in product_sources or region["source_path"] == assigned_source
+        ]
+        runtime_spec["product_truth_map"]["enabled"] = bool(runtime_spec["product_truth_map"]["regions"])
+        runtime_spec["operation"] = "edit"
+    if runtime_spec["defect_memory"]["enabled"]:
+        runtime_spec["defect_memory"]["entries"] = list((context.manifest.get("defect_memory") or {}).get("entries", runtime_spec["defect_memory"]["entries"]))
     if not anchor_path:
-        return context.spec
+        return runtime_spec
     if not anchor_path.is_file():
         raise RendrivaError(f"Model identity anchor is missing: {anchor_path}")
-    runtime_spec = copy.deepcopy(context.spec)
     runtime_spec["model_identity_lock"]["source_path"] = str(anchor_path.resolve())
     runtime_spec["model_identity_lock"]["source_sha256"] = hashlib.sha256(anchor_path.read_bytes()).hexdigest()
     runtime_spec["model_identity_lock"]["anchor_strategy"] = (context.manifest.get("model_identity_lock") or {}).get("anchor_strategy", runtime_spec["model_identity_lock"]["anchor_strategy"])
     item["model_identity_anchor_file"] = str(anchor_path.relative_to(context.job_dir)) if anchor_path.is_relative_to(context.job_dir) else str(anchor_path)
     item["model_identity_anchor_sha256"] = runtime_spec["model_identity_lock"]["source_sha256"]
     return runtime_spec
+
+
+def remember_defects(context: RunContext, review: dict[str, Any]) -> None:
+    policy = context.spec["defect_memory"]
+    if not policy["enabled"]:
+        return
+    observed = [str(value).strip() for value in review.get("defects", []) if str(value).strip()]
+    if not observed:
+        return
+    with context.lock:
+        state = context.manifest.setdefault("defect_memory", copy.deepcopy(policy))
+        state["entries"] = list(dict.fromkeys(state.get("entries", []) + observed))[-policy["max_entries"] :]
 
 
 def review_image(context: RunContext, item: dict[str, Any], prompt: str, image_path: Path) -> dict[str, Any]:
@@ -1779,6 +1946,14 @@ def create_item_payload(context: RunContext, item: dict[str, Any], prompt: str, 
     return context.provider.create(generation_spec, prompt, n=1)[0]
 
 
+def create_repair_payload(context: RunContext, spec: dict[str, Any], prompt: str, failed_path: Path) -> bytes:
+    if spec["localized_repair"]["enabled"]:
+        if not hasattr(context.provider, "repair"):
+            raise ProviderError("The configured provider does not support localized source-image repair.")
+        return context.provider.repair(spec, prompt, failed_path, n=1)[0]
+    return context.provider.create(spec, prompt, n=1)[0]
+
+
 def process_item(
     context: RunContext,
     item: dict[str, Any],
@@ -1804,6 +1979,7 @@ def process_item(
         context.persist()
         context.progress(f"Image {item['index']}/{spec['count']} — judging")
         review = apply_diversity_gate(context, item, image_path, review_image(context, item, prompt, image_path))
+        remember_defects(context, review)
         item["quality"] = review
         if review["passed"]:
             item["status"] = "PASS"
@@ -1819,12 +1995,13 @@ def process_item(
             context.persist()
             context.progress(f"Image {item['index']}/{spec['count']} — repairing")
             repair_prompt = compile_prompt(spec, item, repair=review)
-            repaired = create_item_payload(context, item, repair_prompt, spec)
+            repaired = create_repair_payload(context, spec, repair_prompt, image_path)
             repair_path = image_path.with_name(f"{image_path.stem}-repair-{item['repair_attempts']}{image_path.suffix}")
             save_image(repair_path, repaired)
             locked_composite = apply_locked_layers(repair_path, spec["locked_layers"])
             overlay = apply_text_layers(repair_path, spec["text_layers"])
             repaired_review = apply_diversity_gate(context, item, repair_path, review_image(context, item, repair_prompt, repair_path))
+            remember_defects(context, repaired_review)
             item.setdefault("repair_history", []).append(
                 {
                     "attempt": item["repair_attempts"],
@@ -1844,6 +2021,9 @@ def process_item(
                 context.progress(f"Image {item['index']}/{spec['count']} — repaired and complete")
                 context.persist()
                 return
+            if spec["localized_repair"]["rollback_on_lock_drift"] and not bool((repaired_review.get("vision") or {}).get("localized_repair_scope_preserved", True)):
+                item["repair_rollback_protected"] = True
+                repair_path.unlink(missing_ok=True)
         item["quality"] = review
         item["status"] = "FAILED"
         item["error"] = "Quality requirements were not met after allowed repair attempts."
@@ -2046,10 +2226,36 @@ def run_generation(context: RunContext) -> None:
         return
 
     spec = context.spec
+    checkpoint = spec["approval_checkpoint"]
+    if checkpoint["enabled"] and not checkpoint["approved"]:
+        anchor = next(item for item in context.manifest["outputs"] if item["index"] == checkpoint["anchor_output_index"])
+        if anchor["status"] != "PASS":
+            context.progress(f"Approval checkpoint — generating anchor image {anchor['index']} only")
+            process_item(context, anchor)
+        if anchor["status"] == "PASS" and spec["model_identity_lock"]["enabled"] and not spec["model_identity_lock"].get("source_path"):
+            record_model_identity_anchor(context, context.job_dir / anchor["file"], "approval-checkpoint-anchor", anchor["index"])
+        for item in context.manifest["outputs"]:
+            if item["index"] != anchor["index"] and item["status"] != "PASS":
+                item["status"] = "BLOCKED"
+                item["error"] = "Awaiting user approval of the anchor image before paid batch generation."
+        context.manifest["approval_checkpoint"] = {
+            **checkpoint,
+            "status": "AWAITING_APPROVAL" if anchor["status"] == "PASS" else "ANCHOR_FAILED",
+            "anchor_file": anchor["file"] if anchor["status"] == "PASS" else None,
+        }
+        context.persist()
+        return
     if spec["model_identity_lock"]["enabled"]:
         run_model_identity_generation(context, items)
         return
-    can_batch = spec["mode"] == "variations" and spec["operation"] == "generate" and not spec["reference_images"] and not spec["draft_to_final"]["enabled"]
+    can_batch = (
+        spec["mode"] == "variations"
+        and spec["operation"] == "generate"
+        and not spec["reference_images"]
+        and not spec["draft_to_final"]["enabled"]
+        and not spec["sku_variant_matrix"]["enabled"]
+        and not spec["shot_director"]["enabled"]
+    )
     if can_batch and all(item["attempts"] == 0 for item in items):
         common_item = dict(items[0])
         common_item["batch_variations"] = True
@@ -2109,7 +2315,7 @@ def repair_campaign_outlier(context: RunContext, item: dict[str, Any], campaign_
     runtime_spec = runtime_spec_for_item(context, item)
     prompt = compile_prompt(runtime_spec, item, repair=repair)
     temporary_path = (context.job_dir / item["file"]).with_name(f"{Path(item['file']).stem}-campaign-repair-{attempt}{Path(item['file']).suffix}")
-    payload = create_item_payload(context, item, prompt, runtime_spec)
+    payload = create_repair_payload(context, runtime_spec, prompt, context.job_dir / item["file"])
     save_image(temporary_path, payload)
     locked = apply_locked_layers(temporary_path, runtime_spec["locked_layers"])
     overlay = apply_text_layers(temporary_path, runtime_spec["text_layers"])
@@ -2286,6 +2492,10 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
     )
     model_identity_path = job_dir / "model-identity-report.json"
     json_dump(model_identity_path, manifest["model_identity_report"])
+    commerce_path = job_dir / "commerce-production-report.json"
+    json_dump(commerce_path, build_commerce_report(manifest))
+    video_path = job_dir / "video-continuity-pack.json"
+    json_dump(video_path, build_video_continuity_report(manifest))
     campaign_path = job_dir / "campaign-report.json"
     campaign_review = manifest.get("campaign_visual_review") or {}
     json_dump(
@@ -2320,7 +2530,7 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
                 image_path = job_dir / item["file"]
                 if image_path.is_file():
                     archive.write(image_path, arcname=image_path.name)
-        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path, draft_path, model_identity_path):
+        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path, draft_path, model_identity_path, commerce_path, video_path):
             archive.write(path, arcname=path.name)
         export_root = job_dir / "platform-exports"
         if export_root.is_dir():
@@ -2367,6 +2577,16 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
         "marketplace": spec["marketplace"],
         "product_truth_map": spec["product_truth_map"],
         "draft_to_final": spec["draft_to_final"],
+        "sku_variant_matrix": spec["sku_variant_matrix"],
+        "garment_construction_lock": spec["garment_construction_lock"],
+        "product_visibility_guard": spec["product_visibility_guard"],
+        "reference_preflight": spec["reference_preflight"],
+        "localized_repair": spec["localized_repair"],
+        "sku_color_guard": spec["sku_color_guard"],
+        "shot_director": spec["shot_director"],
+        "approval_checkpoint": spec["approval_checkpoint"],
+        "defect_memory": copy.deepcopy(spec["defect_memory"]),
+        "video_continuity_pack": spec["video_continuity_pack"],
         "model_identity_lock": {
             **spec["model_identity_lock"],
             "status": "ACTIVE" if spec["model_identity_lock"].get("source_path") else "PENDING" if spec["model_identity_lock"]["enabled"] else "DISABLED",
@@ -2472,6 +2692,13 @@ class MockProvider:
             "model_identity_match": True,
             "model_identity_confidence": 1.0,
             "model_identity_observations": "Mock face-identity comparison passed.",
+            "sku_variant_match": True,
+            "garment_construction_match": True,
+            "product_visibility_ratio": 1.0,
+            "product_visibility_pass": True,
+            "sku_color_match": True,
+            "anatomy_quality": True,
+            "localized_repair_scope_preserved": True,
             "region_fidelity": [
                 {"name": region["name"], "passed": True, "confidence": 1.0, "observations": "Mock truth-region comparison passed."}
                 for region in spec["product_truth_map"]["regions"]
@@ -2496,6 +2723,9 @@ class MockProvider:
     ) -> list[bytes]:
         draft_label = draft_path.name if draft_path else "none"
         return self.create(spec, f"{prompt}|identity={identity_path.name}|draft={draft_label}", n=n)
+
+    def repair(self, spec: dict[str, Any], prompt: str, failed_path: Path, n: int = 1) -> list[bytes]:
+        return self.create(spec, f"{prompt}|localized-repair-source={failed_path.name}", n=n)
 
     def judge_campaign(self, spec: dict[str, Any], images: list[tuple[int, Path]]) -> dict[str, Any]:
         return {

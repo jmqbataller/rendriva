@@ -1,0 +1,30 @@
+name: Publish Rendriva Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Verify release package
+        run: |
+          test "$GITHUB_REF_NAME" = "v1.6.0"
+          sha256sum -c dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256
+          unzip -t dist/rendriva-chatgpt-skill-v1.6.0.zip
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.6.0.zip | grep -qx 'SKILL.md'
+      - name: Publish GitHub Release with installable ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/rendriva-chatgpt-skill-v1.6.0.zip \
+            dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256 \
+            --title "Rendriva v1.6.0 — Commerce Production Suite" \
+            --notes "Adds exact SKU-to-output mapping, garment construction and product visibility locks, reference preflight, rollback-safe localized repair, SKU color QA, commerce shot direction, approval checkpoints, campaign defect memory, and video continuity handoff. Includes Single Model Face Lock and all prior production controls."
