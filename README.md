@@ -4,6 +4,19 @@
 
 Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image API batch adapter. It turns an image request into a production workflow: plan, generate, inspect, repair, and deliver each image as an independent file.
 
+## Download for ChatGPT Skills
+
+[Download Rendriva ChatGPT Skill v1.0.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.0.0.zip)
+
+This upload-ready ZIP has `SKILL.md` at the archive root.
+
+1. Download the ZIP.
+2. Open the ChatGPT Skills upload flow.
+3. Select `rendriva-chatgpt-skill-v1.0.0.zip`.
+4. Review the skill details, then confirm the upload.
+
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.0.0.zip.sha256)
+
 ## What Rendriva does
 
 - Generates or edits **1–10 separate images per run**
