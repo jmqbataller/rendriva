@@ -15,7 +15,19 @@
   "campaign": {
     "id": "bottle-launch",
     "consistency": "strict",
-    "grid": "8-point modular grid"
+    "grid": "8-point modular grid",
+    "vision_lock": {
+      "enabled": true,
+      "min_score": 4.0,
+      "max_repair_attempts": 1
+    }
+  },
+  "draft_to_final": {
+    "enabled": true,
+    "candidate_count": 6,
+    "draft_quality": "low",
+    "selection_mode": "auto-score",
+    "include_drafts": true
   },
   "diversity": {
     "enabled": true,

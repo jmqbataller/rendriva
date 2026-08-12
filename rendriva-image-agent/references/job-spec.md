@@ -164,7 +164,7 @@ Do not combine `locked_layers` and `reference_images` in the current adapter. A 
 
 ## Advanced production controls
 
-Rendriva 1.3 supports automatic reference roles, multi-view identity packs, batch diversity, campaign locks, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
+Rendriva 1.4 supports automatic reference roles, multi-view identity packs, verified Campaign Vision Lock, product-region truth maps, draft-to-final promotion, batch diversity, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
 
 ## Supported fields
 
@@ -199,7 +199,10 @@ Rendriva 1.3 supports automatic reference roles, multi-view identity packs, batc
 | `text_safe_mode` | Generate without critical text and reserve layout space |
 | `text_layers` | Exact copy applied after generation |
 | `campaign` | Cross-output campaign ID, consistency level, grid, logo position, and shared tokens |
+| `campaign.vision_lock` | Cross-image palette/type/logo/scale/lighting/grid/diversity judge with targeted outlier repair |
 | `diversity` | Near-duplicate threshold and composition/camera/background variation axes |
+| `product_truth_map` | Named product/logo preservation regions using normalized bounds and optional same-size masks |
+| `draft_to_final` | Low-quality candidate generation, automatic/manual selection, and selected-draft promotion |
 | `platform_exports` | Separate contain-scaled Shopee, Instagram, Facebook, website, or TikTok PNG exports |
 | `marketplace` | Conversion goal plus exact supplied price, discount, CTA, bundle count, and claims |
 | `max_repair_attempts` | Defaults to `1`; capped at `3` |

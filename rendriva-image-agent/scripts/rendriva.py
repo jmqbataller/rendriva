@@ -44,16 +44,18 @@ from rendriva_advanced import (  # noqa: E402
     image_similarity,
     load_brand_profile,
     normalize_campaign,
+    normalize_draft_to_final,
     normalize_diversity,
     normalize_marketplace,
     normalize_platform_exports,
+    normalize_product_truth_map,
     normalize_reference_assets,
     reference_fidelity_report,
     variation_direction,
 )
 
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -529,6 +531,8 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         diversity = normalize_diversity(raw.get("diversity"), count)
         campaign = normalize_campaign(raw.get("campaign"), brand, count)
         platform_exports = normalize_platform_exports(raw.get("platform_exports"))
+        product_truth_map = normalize_product_truth_map(raw.get("product_truth_map"), reference_assets, locked_layers, base_dir)
+        draft_to_final = normalize_draft_to_final(raw.get("draft_to_final"), count)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -559,7 +563,8 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         "fidelity_mode": fidelity_mode, "preserve": preserve,
         "avoid": as_string_list(raw.get("avoid"), "avoid"), "brand": brand,
         "campaign": campaign, "diversity": diversity, "platform_exports": platform_exports,
-        "marketplace": marketplace,
+        "marketplace": marketplace, "product_truth_map": product_truth_map,
+        "draft_to_final": draft_to_final,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
         "text_safe_mode": bool(raw.get("text_safe_mode", bool(text_layers))), "text_layers": text_layers,
         "max_repair_attempts": max_repairs, "min_professional_score": float(threshold),
@@ -723,6 +728,17 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             f"Exact supplied copy only: {json.dumps(marketplace['exact_copy'], ensure_ascii=False, sort_keys=True)}. "
             f"Allowed supplied claims only: {_join(marketplace['claims'])}. Never invent a price, discount, bundle item, rating, guarantee, urgency claim, badge, credential, or CTA."
         )
+    truth_map = spec["product_truth_map"]
+    truth_rule = "No product truth regions are configured."
+    if truth_map["enabled"]:
+        truth_rule = "\n".join(
+            f"{region['name']}: role={region['role']}; required={region['required']}; source={Path(region['source_path']).name}; bbox={region['bbox']}; preserve={_join(region['preserve'])}; strategy={region['comparison_strategy']}"
+            for region in truth_map["regions"]
+        )
+        truth_rule = (
+            "Treat every named region as an independent preservation contract. Never compensate for a failed logo, print, fabric, texture, stitching, label, color, construction, silhouette, material, or identity region with a visually attractive redesign.\n"
+            + truth_rule
+        )
     if item.get("batch_variations"):
         scene = f"Create {spec['count']} independent professional variations across the provider response. Every returned item must remain one standalone image."
         if spec["diversity"]["enabled"]:
@@ -732,6 +748,13 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
         scene = item.get("scene") or f"Create an independent professional variation {item['index']} of {spec['count']}."
         if spec["diversity"]["enabled"]:
             scene += f" Mandatory diversity direction: {item['variation_direction']}."
+    if item.get("selected_draft_file"):
+        scene += (
+            f" Promote the supplied selected draft {item['selected_draft_file']} into final production quality. Preserve its approved composition, camera, hierarchy, and negative-space plan, "
+            "but re-render materials, edges, lighting, and finishing at final quality while all source and truth-region locks remain authoritative."
+        )
+    if item.get("draft_candidate"):
+        scene += " This is a low-cost draft candidate for composition selection, not the final production render. Prioritize clear hierarchy and a distinct usable concept."
     repair_block = ""
     if repair:
         defects = repair.get("defects") or [repair.get("reason", "The previous output failed quality review.")]
@@ -771,6 +794,9 @@ REFERENCE INTELLIGENCE:
 
 MULTI-VIEW PRODUCT IDENTITY:
 {identity_intelligence}
+
+PRODUCT REGION TRUTH MAP:
+{truth_rule}
 
 CAMPAIGN CONSISTENCY:
 {campaign_rule}
@@ -909,12 +935,32 @@ class OpenAIProvider:
             return self.edit(spec, prompt, n=n)
         return self.generate(spec, prompt, n=n)
 
+    def promote(self, spec: dict[str, Any], prompt: str, draft_path: Path, n: int = 1) -> list[bytes]:
+        fields = {
+            "model": spec["image_model"],
+            "prompt": prompt,
+            "n": str(n),
+            "quality": spec["quality"],
+            "size": spec["size"],
+            "output_format": spec["format"],
+            "background": spec["background"],
+        }
+        files = [("image[]", Path(path)) for path in spec["reference_images"]]
+        files.append(("image[]", draft_path))
+        body, content_type = multipart_body(fields, files)
+        payload = api_request("https://api.openai.com/v1/images/edits", self.api_key, raw_body=body, content_type=content_type)
+        images = extract_images(payload)
+        if len(images) != n:
+            raise ProviderError(f"Requested {n} promoted images but the API returned {len(images)}.")
+        return images
+
     def judge(self, spec: dict[str, Any], image_path: Path, prompt: str) -> dict[str, Any]:
         mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
         image_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode()}"
         schema = quality_schema()
         content: list[dict[str, Any]] = [{"type": "input_text", "text": quality_prompt(spec, prompt)}]
-        judge_references = list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]]
+        truth_sources = [region["source_path"] for region in spec["product_truth_map"]["regions"]]
+        judge_references = list(dict.fromkeys(list(spec["reference_images"]) + [layer["path"] for layer in spec["locked_layers"]] + truth_sources))
         if judge_references:
             content.append(
                 {
@@ -923,14 +969,26 @@ class OpenAIProvider:
                 }
             )
             role_lookup = {asset["path"]: asset for asset in spec.get("reference_assets", [])}
+            truth_lookup: dict[str, list[dict[str, Any]]] = {}
+            for region in spec["product_truth_map"]["regions"]:
+                truth_lookup.setdefault(region["source_path"], []).append(region)
             for reference in judge_references:
                 reference_path = Path(reference)
                 asset = role_lookup.get(reference)
                 if asset:
                     content.append({"type": "input_text", "text": f"Reference role={asset['role']}; view={asset['view']}; identity={asset['identity_id'] or 'not-applicable'}."})
+                if truth_lookup.get(reference):
+                    content.append({"type": "input_text", "text": "Truth-map source for regions: " + ", ".join(f"{region['name']} ({region['role']}, bbox={region['bbox']})" for region in truth_lookup[reference]) + "."})
                 reference_mime = mimetypes.guess_type(reference_path.name)[0] or "image/png"
                 reference_url = f"data:{reference_mime};base64,{base64.b64encode(reference_path.read_bytes()).decode()}"
                 content.append({"type": "input_image", "image_url": reference_url})
+            for region in spec["product_truth_map"]["regions"]:
+                if region.get("mask_path"):
+                    mask_path = Path(region["mask_path"])
+                    mask_mime = mimetypes.guess_type(mask_path.name)[0] or "image/png"
+                    mask_url = f"data:{mask_mime};base64,{base64.b64encode(mask_path.read_bytes()).decode()}"
+                    content.append({"type": "input_text", "text": f"Binary or grayscale mask for truth region '{region['name']}' ({region['role']}). White/visible pixels identify the source area to compare."})
+                    content.append({"type": "input_image", "image_url": mask_url})
         content.append({"type": "input_text", "text": "The next image is the generated final output to evaluate."})
         content.append({"type": "input_image", "image_url": image_url})
         request_body = {
@@ -958,6 +1016,25 @@ class OpenAIProvider:
             raise ProviderError(f"The quality judge returned invalid JSON: {text[:500]}") from exc
         return result
 
+    def judge_campaign(self, spec: dict[str, Any], images: list[tuple[int, Path]]) -> dict[str, Any]:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": campaign_vision_prompt(spec, [index for index, _path in images])}]
+        for index, image_path in images:
+            mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
+            image_url = f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode()}"
+            content.append({"type": "input_text", "text": f"Campaign output index {index}."})
+            content.append({"type": "input_image", "image_url": image_url})
+        request_body = {
+            "model": spec["judge_model"],
+            "input": [{"role": "user", "content": content}],
+            "text": {"format": {"type": "json_schema", "name": "rendriva_campaign_vision_review", "strict": True, "schema": campaign_vision_schema()}},
+        }
+        payload = api_request("https://api.openai.com/v1/responses", self.api_key, json_body=request_body, timeout=240)
+        text = extract_response_text(payload)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"The campaign vision judge returned invalid JSON: {text[:500]}") from exc
+
 
 def quality_schema() -> dict[str, Any]:
     score_properties = {name: {"type": "number", "minimum": 0, "maximum": 5} for name in SCORED_DIMENSIONS}
@@ -970,6 +1047,20 @@ def quality_schema() -> dict[str, Any]:
             "instruction_following": {"type": "boolean"},
             "reference_preservation": {"type": "boolean"},
             "text_correctness": {"type": "boolean"},
+            "region_fidelity": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string"},
+                        "passed": {"type": "boolean"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "observations": {"type": "string"},
+                    },
+                    "required": ["name", "passed", "confidence", "observations"],
+                },
+            },
             "scores": {
                 "type": "object",
                 "additionalProperties": False,
@@ -986,12 +1077,72 @@ def quality_schema() -> dict[str, Any]:
             "instruction_following",
             "reference_preservation",
             "text_correctness",
+            "region_fidelity",
             "scores",
             "defects",
             "repair_prompt",
             "summary",
         ],
     }
+
+
+CAMPAIGN_VISION_DIMENSIONS = [
+    "palette_consistency",
+    "typography_consistency",
+    "logo_consistency",
+    "product_scale_rhythm",
+    "lighting_coherence",
+    "spacing_grid_consistency",
+    "diversity_preserved",
+]
+
+
+def campaign_vision_schema() -> dict[str, Any]:
+    score_properties = {name: {"type": "number", "minimum": 0, "maximum": 5} for name in CAMPAIGN_VISION_DIMENSIONS}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "passed": {"type": "boolean"},
+            "scores": {"type": "object", "additionalProperties": False, "properties": score_properties, "required": CAMPAIGN_VISION_DIMENSIONS},
+            "outlier_indices": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 10}},
+            "defects_by_index": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"index": {"type": "integer", "minimum": 1, "maximum": 10}, "defects": {"type": "array", "items": {"type": "string"}}},
+                    "required": ["index", "defects"],
+                },
+            },
+            "repair_prompts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"index": {"type": "integer", "minimum": 1, "maximum": 10}, "prompt": {"type": "string"}},
+                    "required": ["index", "prompt"],
+                },
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["passed", "scores", "outlier_indices", "defects_by_index", "repair_prompts", "summary"],
+    }
+
+
+def campaign_vision_prompt(spec: dict[str, Any], indices: list[int]) -> str:
+    campaign = spec["campaign"]
+    return f"""Act as the senior campaign art director for a true cross-image review. Compare all attached outputs together, not independently.
+
+CAMPAIGN ID: {campaign['id']}
+CONSISTENCY: {campaign['consistency']}
+TOKEN SIGNATURE: {campaign['signature']}
+TOKENS: {json.dumps(campaign['tokens'], ensure_ascii=False, sort_keys=True)}
+OUTPUT INDICES: {indices}
+
+Verify shared palette logic, typography system, logo treatment and safe-zone behavior, product-scale rhythm, lighting family, spacing/grid logic, and professional finish. Also verify meaningful composition/camera/background diversity; consistency must not become duplication. Product identity and truth-region locks remain non-negotiable.
+
+Score every dimension from 0 to 5. The required average is {campaign['vision_lock']['min_score']:.1f}/5. Mark passed only when the average reaches the threshold and there are no material campaign outliers. Identify only genuine outlier indices. Provide defect-specific repair instructions for each outlier without changing protected products, logos, exact text, or passing outputs."""
 
 
 def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
@@ -1023,6 +1174,23 @@ def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
             f"MARKETPLACE TRUTH GATE: exact allowed copy is {json.dumps(spec['marketplace']['exact_copy'], ensure_ascii=False, sort_keys=True)} and allowed claims are {_join(spec['marketplace']['claims'])}. "
             "Fail instruction following or text correctness for any invented price, discount, rating, guarantee, bundle content, badge, credential, or urgency claim."
         )
+    truth_gate = "No product-region truth map applies. Return an empty region_fidelity array."
+    if spec["product_truth_map"]["enabled"]:
+        region_contracts = [
+            {
+                "name": region["name"],
+                "role": region["role"],
+                "required": region["required"],
+                "bbox": region["bbox"],
+                "preserve": region["preserve"],
+                "strategy": region["comparison_strategy"],
+            }
+            for region in spec["product_truth_map"]["regions"]
+        ]
+        truth_gate = (
+            f"PRODUCT REGION TRUTH GATE: evaluate every contract by exact name and return one region_fidelity result per contract: {json.dumps(region_contracts, ensure_ascii=False, sort_keys=True)}. "
+            "Any failed required region must make reference_preservation and gates_pass false. Literal-source-composite regions should pass when the recorded source-derived layer is visibly intact."
+        )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
@@ -1037,6 +1205,8 @@ Fail the gates if the image is a collage/grid/multi-panel output, misses require
 {campaign_gate}
 
 {marketplace_gate}
+
+{truth_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -1355,6 +1525,16 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
     gates = bool(vision.get("gates_pass")) and not bool(vision.get("collage_violation"))
     if spec["fidelity_mode"] == "strict" and (spec["protected_reference"] or spec["locked_layers"]):
         gates = gates and bool(vision.get("reference_preservation"))
+    required_regions = {region["name"] for region in spec["product_truth_map"]["regions"] if region["required"]}
+    region_results = {str(result.get("name")): result for result in vision.get("region_fidelity", [])}
+    missing_regions = sorted(required_regions - set(region_results))
+    failed_regions = sorted(name for name in required_regions if name in region_results and not bool(region_results[name].get("passed")))
+    if missing_regions or failed_regions:
+        gates = False
+        if missing_regions:
+            defects.append(f"Required truth regions were not evaluated: {', '.join(missing_regions)}.")
+        if failed_regions:
+            defects.append(f"Required truth regions failed preservation: {', '.join(failed_regions)}.")
     passed = gates and average >= spec["min_professional_score"]
     defects.extend(str(value) for value in vision.get("defects", []))
     if average < spec["min_professional_score"]:
@@ -1426,6 +1606,18 @@ def apply_diversity_gate(context: RunContext, item: dict[str, Any], image_path: 
     return review
 
 
+def create_item_payload(context: RunContext, item: dict[str, Any], prompt: str) -> bytes:
+    selected_draft = item.get("selected_draft_file")
+    if selected_draft:
+        draft_path = context.job_dir / selected_draft
+        if not draft_path.is_file():
+            raise RendrivaError(f"Selected draft file is missing: {selected_draft}")
+        if not hasattr(context.provider, "promote"):
+            raise ProviderError("The configured provider does not support draft-to-final promotion.")
+        return context.provider.promote(context.spec, prompt, draft_path, n=1)[0]
+    return context.provider.create(context.spec, prompt, n=1)[0]
+
+
 def process_item(
     context: RunContext,
     item: dict[str, Any],
@@ -1443,7 +1635,7 @@ def process_item(
         item["attempts"] += 1
         context.persist()
         context.progress(f"Image {item['index']}/{spec['count']} — generating")
-        payload = initial_bytes if initial_bytes is not None else context.provider.create(spec, prompt, n=1)[0]
+        payload = initial_bytes if initial_bytes is not None else create_item_payload(context, item, prompt)
         save_image(image_path, payload)
         item["locked_layer_composite"] = apply_locked_layers(image_path, spec["locked_layers"])
         item["text_overlay"] = apply_text_layers(image_path, spec["text_layers"])
@@ -1466,7 +1658,7 @@ def process_item(
             context.persist()
             context.progress(f"Image {item['index']}/{spec['count']} — repairing")
             repair_prompt = compile_prompt(spec, item, repair=review)
-            repaired = context.provider.create(spec, repair_prompt, n=1)[0]
+            repaired = create_item_payload(context, item, repair_prompt)
             repair_path = image_path.with_name(f"{image_path.stem}-repair-{item['repair_attempts']}{image_path.suffix}")
             save_image(repair_path, repaired)
             locked_composite = apply_locked_layers(repair_path, spec["locked_layers"])
@@ -1502,6 +1694,106 @@ def process_item(
         context.persist()
 
 
+def run_draft_to_final(context: RunContext) -> None:
+    policy = context.spec["draft_to_final"]
+    if not policy["enabled"]:
+        return
+    existing = context.manifest.get("draft_selection") or {}
+    existing_selection = existing.get("selected_candidates", [])
+    existing_files = [context.job_dir / f"drafts/draft-{index:02d}.{extension_for(context.spec['format'])}" for index in existing_selection]
+    if existing.get("status") == "SELECTED" and len(existing_selection) == context.spec["count"] and all(path.is_file() for path in existing_files):
+        for item, candidate_index in zip(context.manifest["outputs"], existing_selection):
+            item["selected_draft_index"] = candidate_index
+            item["selected_draft_file"] = f"drafts/draft-{candidate_index:02d}.{extension_for(context.spec['format'])}"
+        context.persist()
+        return
+
+    draft_spec = copy.deepcopy(context.spec)
+    draft_spec["count"] = policy["candidate_count"]
+    draft_spec["mode"] = "variations"
+    draft_spec["scenes"] = []
+    draft_spec["quality"] = policy["draft_quality"]
+    draft_spec["draft_to_final"] = {**policy, "enabled": False}
+    draft_spec["text_layers"] = []
+    draft_spec["text_safe_mode"] = True
+    draft_plan = build_plan(draft_spec)
+    common_item = dict(draft_plan[0])
+    common_item["batch_variations"] = True
+    common_item["draft_candidate"] = True
+    prompt = compile_prompt(draft_spec, common_item)
+    context.progress(f"Generating {policy['candidate_count']} low-cost draft candidates for selection")
+    payloads = context.provider.create(draft_spec, prompt, n=policy["candidate_count"])
+    if len(payloads) != policy["candidate_count"]:
+        raise ProviderError(f"Draft provider returned {len(payloads)} candidates for {policy['candidate_count']} planned drafts.")
+
+    draft_root = context.job_dir / "drafts"
+    draft_root.mkdir(parents=True, exist_ok=True)
+    candidates: list[dict[str, Any]] = []
+    for candidate_index, payload in enumerate(payloads, start=1):
+        relative = f"drafts/draft-{candidate_index:02d}.{extension_for(context.spec['format'])}"
+        path = context.job_dir / relative
+        save_image(path, payload)
+        locked = apply_locked_layers(path, draft_spec["locked_layers"])
+        overlay = {
+            "applied": False,
+            "font_fallback": False,
+            "reason": "Exact typography is withheld from draft promotion sources and applied only to final outputs.",
+        }
+        candidate_item = draft_plan[candidate_index - 1]
+        candidate_item["draft_candidate"] = True
+        candidate_prompt = compile_prompt(draft_spec, candidate_item)
+        structural = structural_review(draft_spec, path)
+        vision = context.provider.judge(draft_spec, path, candidate_prompt) if structural["passed"] and context.use_vision_judge else None
+        review = finalize_review(draft_spec, structural, vision)
+        candidates.append(
+            {
+                "index": candidate_index,
+                "file": relative,
+                "status": "PASS" if review["passed"] else "FAILED",
+                "quality": review,
+                "score": review.get("average_score"),
+                "locked_layer_composite": locked,
+                "text_overlay": overlay,
+                "selected": False,
+            }
+        )
+
+    if policy["selection_mode"] == "manual":
+        selected = list(policy["selection"])
+        failed_selected = [index for index in selected if candidates[index - 1]["status"] != "PASS"]
+        if failed_selected:
+            raise RendrivaError(f"Manual draft selection contains candidates that did not pass draft QA: {failed_selected}.")
+    else:
+        passing = [candidate for candidate in candidates if candidate["status"] == "PASS"]
+        passing.sort(key=lambda candidate: (-(candidate["score"] if candidate["score"] is not None else 0), candidate["index"]))
+        selected = []
+        for candidate in passing:
+            if not context.spec["diversity"]["enabled"] or all(
+                image_similarity(context.job_dir / candidate["file"], context.job_dir / candidates[chosen - 1]["file"])
+                <= context.spec["diversity"]["max_similarity"]
+                for chosen in selected
+            ):
+                selected.append(candidate["index"])
+            if len(selected) == context.spec["count"]:
+                break
+    if len(selected) != context.spec["count"]:
+        raise RendrivaError(f"Draft selection produced only {len(selected)} usable candidates for {context.spec['count']} final outputs.")
+    selected_set = set(selected)
+    for candidate in candidates:
+        candidate["selected"] = candidate["index"] in selected_set
+    for item, candidate_index in zip(context.manifest["outputs"], selected):
+        item["selected_draft_index"] = candidate_index
+        item["selected_draft_file"] = f"drafts/draft-{candidate_index:02d}.{extension_for(context.spec['format'])}"
+    context.manifest["draft_selection"] = {
+        "status": "SELECTED",
+        "selection_mode": policy["selection_mode"],
+        "draft_quality": policy["draft_quality"],
+        "selected_candidates": selected,
+        "candidates": candidates,
+    }
+    context.persist()
+
+
 def run_generation(context: RunContext) -> None:
     items = [item for item in context.manifest["outputs"] if item["status"] != "PASS"]
     if not items:
@@ -1509,7 +1801,7 @@ def run_generation(context: RunContext) -> None:
         return
 
     spec = context.spec
-    can_batch = spec["mode"] == "variations" and spec["operation"] == "generate" and not spec["reference_images"]
+    can_batch = spec["mode"] == "variations" and spec["operation"] == "generate" and not spec["reference_images"] and not spec["draft_to_final"]["enabled"]
     if can_batch and all(item["attempts"] == 0 for item in items):
         common_item = dict(items[0])
         common_item["batch_variations"] = True
@@ -1549,6 +1841,97 @@ def run_generation(context: RunContext) -> None:
                 context.progress(f"Unexpected worker failure: {exc}")
 
 
+def finalize_campaign_vision_review(spec: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    scores = review.get("scores", {})
+    values = [float(scores.get(name, 0)) for name in CAMPAIGN_VISION_DIMENSIONS]
+    average = sum(values) / len(values)
+    valid_indices = set(range(1, spec["count"] + 1))
+    outliers = sorted({int(index) for index in review.get("outlier_indices", []) if int(index) in valid_indices})
+    passed = bool(review.get("passed")) and average >= spec["campaign"]["vision_lock"]["min_score"] and not outliers
+    return {**review, "verified": True, "average_score": round(average, 3), "outlier_indices": outliers, "passed": passed}
+
+
+def repair_campaign_outlier(context: RunContext, item: dict[str, Any], campaign_review: dict[str, Any], attempt: int) -> bool:
+    defects_lookup = {int(entry["index"]): entry.get("defects", []) for entry in campaign_review.get("defects_by_index", [])}
+    prompt_lookup = {int(entry["index"]): entry.get("prompt", "") for entry in campaign_review.get("repair_prompts", [])}
+    repair = {
+        "defects": defects_lookup.get(item["index"], ["This image is a visual outlier in the campaign batch."]),
+        "repair_prompt": prompt_lookup.get(item["index"], "Match the shared campaign system while keeping this composition distinct."),
+    }
+    prompt = compile_prompt(context.spec, item, repair=repair)
+    temporary_path = (context.job_dir / item["file"]).with_name(f"{Path(item['file']).stem}-campaign-repair-{attempt}{Path(item['file']).suffix}")
+    payload = create_item_payload(context, item, prompt)
+    save_image(temporary_path, payload)
+    locked = apply_locked_layers(temporary_path, context.spec["locked_layers"])
+    overlay = apply_text_layers(temporary_path, context.spec["text_layers"])
+    review = apply_diversity_gate(context, item, temporary_path, review_image(context, item, prompt, temporary_path))
+    item.setdefault("campaign_repair_history", []).append(
+        {"attempt": attempt, "file": temporary_path.name, "prompt": prompt, "quality": review, "locked_layer_composite": locked, "text_overlay": overlay}
+    )
+    if review["passed"]:
+        temporary_path.replace(context.job_dir / item["file"])
+        item["quality"] = review
+        item["selected_campaign_repair"] = attempt
+        return True
+    temporary_path.unlink(missing_ok=True)
+    return False
+
+
+def run_campaign_vision_lock(context: RunContext) -> None:
+    policy = context.spec["campaign"]["vision_lock"]
+    existing = context.manifest.get("campaign_visual_review") or {}
+    if existing.get("verified") and existing.get("passed"):
+        return
+    passing = [item for item in context.manifest["outputs"] if item["status"] == "PASS"]
+    if not policy["enabled"] or len(passing) < 2:
+        context.manifest["campaign_visual_review"] = {
+            "verified": False,
+            "passed": False,
+            "reason": "Campaign Vision Lock requires at least two passing outputs." if policy["enabled"] else "Campaign Vision Lock is disabled.",
+            "attempts": [],
+        }
+        context.persist()
+        return
+    if not context.use_vision_judge or not hasattr(context.provider, "judge_campaign"):
+        context.manifest["campaign_visual_review"] = {
+            "verified": False,
+            "passed": False,
+            "reason": "Cross-image campaign vision judging is unavailable or disabled.",
+            "attempts": [],
+        }
+        context.persist()
+        return
+
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(policy["max_repair_attempts"] + 1):
+        passing = [item for item in context.manifest["outputs"] if item["status"] == "PASS"]
+        images = [(item["index"], context.job_dir / item["file"]) for item in passing]
+        review = finalize_campaign_vision_review(context.spec, context.provider.judge_campaign(context.spec, images))
+        attempts.append({"attempt": attempt, "review": review})
+        if review["passed"]:
+            context.manifest["campaign_visual_review"] = {**review, "attempts": attempts}
+            context.persist()
+            return
+        if attempt >= policy["max_repair_attempts"] or not review["outlier_indices"]:
+            break
+        context.progress(f"Campaign Vision Lock found outliers {review['outlier_indices']} — repairing only those outputs")
+        for index in review["outlier_indices"]:
+            item = next((candidate for candidate in passing if candidate["index"] == index), None)
+            if item and not repair_campaign_outlier(context, item, review, attempt + 1):
+                item["status"] = "FAILED"
+                item["error"] = "Campaign outlier repair did not pass per-image quality review."
+        context.persist()
+
+    final_review = attempts[-1]["review"] if attempts else {"verified": False, "passed": False, "reason": "No campaign review ran."}
+    context.manifest["campaign_visual_review"] = {**final_review, "attempts": attempts}
+    for index in final_review.get("outlier_indices", []):
+        item = next((candidate for candidate in context.manifest["outputs"] if candidate["index"] == index), None)
+        if item and item["status"] == "PASS":
+            item["status"] = "FAILED"
+            item["error"] = "Campaign Vision Lock still identified this output as an outlier after allowed repairs."
+    context.persist()
+
+
 def quality_report(manifest: dict[str, Any]) -> dict[str, Any]:
     counts = {status: 0 for status in ("PASS", "FAILED", "BLOCKED", "NEEDS_REPAIR")}
     results = []
@@ -1566,7 +1949,13 @@ def quality_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 "error": item.get("error"),
             }
         )
-    return {"job_id": manifest["job_id"], "counts": counts, "outputs": results}
+    return {
+        "job_id": manifest["job_id"],
+        "counts": counts,
+        "campaign_visual_review": manifest.get("campaign_visual_review"),
+        "draft_selection": manifest.get("draft_selection"),
+        "outputs": results,
+    }
 
 
 def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
@@ -1579,15 +1968,27 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
     json_dump(fidelity_path, reference_fidelity_report(manifest))
     diversity_path = job_dir / "diversity-report.json"
     json_dump(diversity_path, diversity_report(job_dir, manifest))
+    draft_path = job_dir / "draft-selection-report.json"
+    json_dump(
+        draft_path,
+        manifest.get("draft_selection", {"status": "DISABLED", "reason": "Draft-to-final workflow was not enabled."}),
+    )
     campaign_path = job_dir / "campaign-report.json"
+    campaign_review = manifest.get("campaign_visual_review") or {}
     json_dump(
         campaign_path,
         {
             "job_id": manifest["job_id"],
             "campaign": manifest["spec"]["campaign"],
-            "evidence_scope": "policy-and-per-output-qa",
-            "batch_visual_consistency_verified": False,
-            "verification_note": "This report proves shared campaign tokens and per-output QA instructions. It does not claim a separate cross-output vision comparison.",
+            "evidence_scope": "cross-image-vision-comparison" if campaign_review.get("verified") else "policy-and-per-output-qa",
+            "batch_visual_consistency_verified": bool(campaign_review.get("verified")),
+            "batch_visual_consistency_passed": bool(campaign_review.get("passed")),
+            "vision_review": campaign_review,
+            "verification_note": (
+                "All passing outputs were compared together by Campaign Vision Lock."
+                if campaign_review.get("verified")
+                else "Shared tokens and per-output QA are recorded, but cross-image vision comparison was unavailable or unnecessary."
+            ),
             "outputs": [
                 {"index": item["index"], "file": item["file"], "status": item["status"], "campaign_signature": item["campaign_signature"]}
                 for item in manifest["outputs"]
@@ -1603,12 +2004,17 @@ def package_outputs(job_dir: Path, manifest: dict[str, Any]) -> Path:
                 image_path = job_dir / item["file"]
                 if image_path.is_file():
                     archive.write(image_path, arcname=image_path.name)
-        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path):
+        for path in (job_dir / "manifest.json", report_path, brand_profile_path, fidelity_path, diversity_path, campaign_path, draft_path):
             archive.write(path, arcname=path.name)
         export_root = job_dir / "platform-exports"
         if export_root.is_dir():
             for path in sorted(export_root.glob("*.png")):
                 archive.write(path, arcname=str(path.relative_to(job_dir)))
+        if manifest["spec"]["draft_to_final"]["enabled"] and manifest["spec"]["draft_to_final"]["include_drafts"]:
+            draft_root = job_dir / "drafts"
+            if draft_root.is_dir():
+                for path in sorted(draft_root.glob("draft-*")):
+                    archive.write(path, arcname=str(path.relative_to(job_dir)))
     return archive_path
 
 
@@ -1643,6 +2049,8 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
         },
         "campaign": spec["campaign"],
         "marketplace": spec["marketplace"],
+        "product_truth_map": spec["product_truth_map"],
+        "draft_to_final": spec["draft_to_final"],
         "spec": spec,
         "outputs": build_plan(spec),
     }
@@ -1685,7 +2093,9 @@ def execute(
 
     context = RunContext(spec, job_dir, manifest, provider, use_vision_judge, threading.Lock(), cancelled, progress)
     try:
+        run_draft_to_final(context)
         run_generation(context)
+        run_campaign_vision_lock(context)
         context.persist()
         package_outputs(job_dir, manifest)
     finally:
@@ -1732,10 +2142,27 @@ class MockProvider:
             "instruction_following": True,
             "reference_preservation": True,
             "text_correctness": True,
+            "region_fidelity": [
+                {"name": region["name"], "passed": True, "confidence": 1.0, "observations": "Mock truth-region comparison passed."}
+                for region in spec["product_truth_map"]["regions"]
+            ],
             "scores": {name: 4.5 for name in SCORED_DIMENSIONS},
             "defects": [],
             "repair_prompt": "",
             "summary": "Mock professional review passed.",
+        }
+
+    def promote(self, spec: dict[str, Any], prompt: str, draft_path: Path, n: int = 1) -> list[bytes]:
+        return self.create(spec, f"{prompt}|promoted-from={draft_path.name}", n=n)
+
+    def judge_campaign(self, spec: dict[str, Any], images: list[tuple[int, Path]]) -> dict[str, Any]:
+        return {
+            "passed": True,
+            "scores": {name: 4.5 for name in CAMPAIGN_VISION_DIMENSIONS},
+            "outlier_indices": [],
+            "defects_by_index": [],
+            "repair_prompts": [],
+            "summary": "Mock cross-image campaign review passed.",
         }
 
 
@@ -1772,7 +2199,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         report = quality_report(manifest)
         print(json.dumps({"job_dir": str(job_dir), **report}, indent=2, ensure_ascii=False))
-        return 0 if report["counts"]["FAILED"] == 0 and report["counts"]["BLOCKED"] == 0 else 2
+        campaign_required = spec["campaign"]["vision_lock"]["enabled"] and spec["count"] > 1
+        campaign_ok = bool((report.get("campaign_visual_review") or {}).get("passed"))
+        return 0 if report["counts"]["FAILED"] == 0 and report["counts"]["BLOCKED"] == 0 and (not campaign_required or campaign_ok) else 2
     except (RendrivaError, OSError) as exc:
         print(f"Rendriva error: {exc}", file=sys.stderr)
         return 1

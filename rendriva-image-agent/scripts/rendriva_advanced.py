@@ -69,6 +69,10 @@ MARKETPLACE_GOALS = {
     "bundle": "Show the supplied bundle count and contents clearly; never invent included items.",
     "trust-builder": "Use only supplied proof points, guarantees, ratings, or credentials.",
 }
+TRUTH_REGION_ROLES = {
+    "silhouette", "fabric", "texture", "construction", "print", "logo",
+    "label", "color", "stitching", "material", "identity",
+}
 
 
 def _sha256(path: str | Path) -> str:
@@ -261,6 +265,17 @@ def normalize_campaign(value: Any, brand: dict[str, Any], count: int) -> dict[st
     }
     tokens.update(value.get("tokens", {}) if isinstance(value.get("tokens", {}), dict) else {})
     signature = hashlib.sha256(json.dumps(tokens, sort_keys=True).encode()).hexdigest()[:16]
+    vision_value = value.get("vision_lock", count > 1)
+    if isinstance(vision_value, bool):
+        vision_value = {"enabled": vision_value}
+    if not isinstance(vision_value, dict):
+        raise ValueError("campaign.vision_lock must be a boolean or object.")
+    vision_min_score = float(vision_value.get("min_score", 4.0))
+    vision_repairs = vision_value.get("max_repair_attempts", 1)
+    if not 0 <= vision_min_score <= 5:
+        raise ValueError("campaign.vision_lock.min_score must be from 0 through 5.")
+    if isinstance(vision_repairs, bool) or not isinstance(vision_repairs, int) or not 0 <= vision_repairs <= 2:
+        raise ValueError("campaign.vision_lock.max_repair_attempts must be an integer from 0 through 2.")
     return {
         "enabled": bool(value.get("enabled", count > 1 or bool(value))),
         "id": str(value.get("id", "default-campaign")),
@@ -268,6 +283,153 @@ def normalize_campaign(value: Any, brand: dict[str, Any], count: int) -> dict[st
         "consistency": consistency,
         "tokens": tokens,
         "signature": signature,
+        "vision_lock": {
+            "enabled": bool(vision_value.get("enabled", count > 1)),
+            "min_score": vision_min_score,
+            "max_repair_attempts": vision_repairs,
+        },
+    }
+
+
+def normalize_product_truth_map(
+    value: Any,
+    reference_assets: list[dict[str, Any]],
+    locked_layers: list[dict[str, Any]],
+    base_dir: Path,
+) -> dict[str, Any]:
+    if value is False:
+        return {"enabled": False, "mode": "disabled", "regions": []}
+    if value is None:
+        regions: list[dict[str, Any]] = []
+        sources = [
+            {"path": asset["path"], "source_role": asset["role"], "identity_id": asset.get("identity_id", ""), "strategy": "vision-comparison"}
+            for asset in reference_assets if asset["role"] in {"product", "identity", "logo"}
+        ] + [
+            {"path": layer["path"], "source_role": layer["role"], "identity_id": "", "strategy": "literal-source-composite"}
+            for layer in locked_layers if layer["role"] in {"product", "identity", "logo", "artwork", "protected-asset"}
+        ]
+        for source_index, source in enumerate(sources, start=1):
+            stem = source["identity_id"] or Path(source["path"]).stem
+            if source["source_role"] == "logo":
+                roles = ["logo"]
+            elif source["source_role"] in {"artwork"}:
+                roles = ["print", "color"]
+            else:
+                roles = ["silhouette", "material"]
+            for role in roles:
+                regions.append(
+                    {
+                        "name": f"{stem}-{role}-{source_index}",
+                        "role": role,
+                        "source_path": source["path"],
+                        "source_sha256": _sha256(source["path"]),
+                        "mask_path": None,
+                        "mask_sha256": None,
+                        "bbox": [0.0, 0.0, 1.0, 1.0],
+                        "required": True,
+                        "preserve": [f"exact {role}"],
+                        "comparison_strategy": source["strategy"],
+                    }
+                )
+        return {"enabled": bool(regions), "mode": "automatic-whole-asset", "regions": regions}
+    if not isinstance(value, dict):
+        raise ValueError("product_truth_map must be false or an object.")
+    raw_regions = value.get("regions", [])
+    if not isinstance(raw_regions, list) or any(not isinstance(region, dict) for region in raw_regions):
+        raise ValueError("product_truth_map.regions must be a list of objects.")
+    default_sources = [asset["path"] for asset in reference_assets if asset["role"] in {"product", "identity", "logo"}]
+    default_sources += [layer["path"] for layer in locked_layers]
+    normalized: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for index, raw in enumerate(raw_regions, start=1):
+        name = str(raw.get("name", f"region-{index}")).strip()
+        if not name or name in names:
+            raise ValueError(f"product_truth_map.regions[{index}].name must be unique and non-empty.")
+        names.add(name)
+        role = str(raw.get("role", "identity"))
+        if role not in TRUTH_REGION_ROLES:
+            raise ValueError(f"product_truth_map.regions[{index}].role must be one of: {', '.join(sorted(TRUTH_REGION_ROLES))}.")
+        source_value = raw.get("source_path", raw.get("source"))
+        if source_value is None:
+            if not default_sources:
+                raise ValueError(f"product_truth_map.regions[{index}] needs a source_path because no protected source is available.")
+            source_path = default_sources[0]
+        elif not isinstance(source_value, str) or not source_value.strip():
+            raise ValueError(f"product_truth_map.regions[{index}].source_path must be a non-empty string.")
+        else:
+            source_path = _resolved_file(source_value, base_dir, "Truth-map source")
+        mask_path = None
+        if raw.get("mask_path") is not None:
+            if not isinstance(raw["mask_path"], str) or not raw["mask_path"].strip():
+                raise ValueError(f"product_truth_map.regions[{index}].mask_path must be a non-empty string.")
+            mask_path = _resolved_file(raw["mask_path"], base_dir, "Truth-map mask")
+            if Image is not None:
+                try:
+                    with Image.open(source_path) as source_image, Image.open(mask_path) as mask_image:
+                        if source_image.size != mask_image.size:
+                            raise ValueError(f"product_truth_map.regions[{index}] mask dimensions must match its source image.")
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    raise ValueError(f"product_truth_map.regions[{index}] mask/source images could not be inspected: {exc}") from exc
+        bbox = raw.get("bbox", [0.0, 0.0, 1.0, 1.0])
+        if not isinstance(bbox, list) or len(bbox) != 4 or any(isinstance(number, bool) or not isinstance(number, (int, float)) for number in bbox):
+            raise ValueError(f"product_truth_map.regions[{index}].bbox must be [x, y, width, height].")
+        bbox = [float(number) for number in bbox]
+        if any(number < 0 or number > 1 for number in bbox) or bbox[2] <= 0 or bbox[3] <= 0 or bbox[0] + bbox[2] > 1 or bbox[1] + bbox[3] > 1:
+            raise ValueError(f"product_truth_map.regions[{index}].bbox must fit inside normalized source bounds.")
+        preserve = raw.get("preserve", [f"exact {role}"])
+        if not isinstance(preserve, list) or any(not isinstance(item, str) or not item.strip() for item in preserve):
+            raise ValueError(f"product_truth_map.regions[{index}].preserve must be a list of non-empty strings.")
+        literal = source_path in {layer["path"] for layer in locked_layers}
+        normalized.append(
+            {
+                "name": name,
+                "role": role,
+                "source_path": source_path,
+                "source_sha256": _sha256(source_path),
+                "mask_path": mask_path,
+                "mask_sha256": _sha256(mask_path) if mask_path else None,
+                "bbox": bbox,
+                "required": bool(raw.get("required", True)),
+                "preserve": [item.strip() for item in preserve],
+                "comparison_strategy": "literal-source-composite" if literal else "masked-vision-comparison" if mask_path else "bounded-vision-comparison",
+            }
+        )
+    return {"enabled": bool(value.get("enabled", True)) and bool(normalized), "mode": "explicit-regions", "regions": normalized}
+
+
+def normalize_draft_to_final(value: Any, final_count: int) -> dict[str, Any]:
+    if value is None:
+        value = False
+    if isinstance(value, bool):
+        value = {"enabled": value}
+    if not isinstance(value, dict):
+        raise ValueError("draft_to_final must be a boolean or object.")
+    enabled = bool(value.get("enabled", True))
+    candidate_count = value.get("candidate_count", min(10, max(final_count * 2, final_count)))
+    if isinstance(candidate_count, bool) or not isinstance(candidate_count, int) or not final_count <= candidate_count <= 10:
+        raise ValueError("draft_to_final.candidate_count must be an integer from final count through 10.")
+    draft_quality = str(value.get("draft_quality", "low"))
+    if draft_quality not in {"low", "medium", "auto"}:
+        raise ValueError("draft_to_final.draft_quality must be low, medium, or auto.")
+    selection_mode = str(value.get("selection_mode", "auto-score"))
+    if selection_mode not in {"auto-score", "manual"}:
+        raise ValueError("draft_to_final.selection_mode must be auto-score or manual.")
+    selection = value.get("selection", [])
+    if not isinstance(selection, list) or any(isinstance(item, bool) or not isinstance(item, int) for item in selection):
+        raise ValueError("draft_to_final.selection must be a list of candidate numbers.")
+    if selection_mode == "manual" and enabled and len(selection) != final_count:
+        raise ValueError("Manual draft selection must contain exactly one candidate number per final output.")
+    if len(set(selection)) != len(selection) or any(item < 1 or item > candidate_count for item in selection):
+        raise ValueError("draft_to_final.selection contains a duplicate or out-of-range candidate number.")
+    return {
+        "enabled": enabled,
+        "candidate_count": candidate_count,
+        "draft_quality": draft_quality,
+        "selection_mode": selection_mode,
+        "selection": selection,
+        "include_drafts": bool(value.get("include_drafts", True)),
     }
 
 
@@ -395,6 +557,7 @@ def reference_fidelity_report(manifest: dict[str, Any]) -> dict[str, Any]:
                 "status": item["status"],
                 "reference_preservation": ((item.get("quality") or {}).get("vision") or {}).get("reference_preservation"),
                 "literal_source_layers": composite.get("layers", []),
+                "region_fidelity": ((item.get("quality") or {}).get("vision") or {}).get("region_fidelity", []),
                 "evidence_note": (item.get("quality") or {}).get("evidence_note"),
             }
         )
@@ -403,6 +566,7 @@ def reference_fidelity_report(manifest: dict[str, Any]) -> dict[str, Any]:
         "fidelity_mode": spec.get("fidelity_mode"),
         "reference_assets": spec.get("reference_assets", []),
         "identity_packs": spec.get("identity_packs", []),
+        "product_truth_map": spec.get("product_truth_map", {"enabled": False, "regions": []}),
         "outputs": outputs,
     }
 
