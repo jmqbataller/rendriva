@@ -29,3 +29,8 @@ jobs:
         run: python -m unittest discover -s rendriva-image-agent/scripts/tests -v
       - name: Validate example job
         run: python rendriva-image-agent/scripts/rendriva.py rendriva-image-agent/scripts/example-job.json --dry-run
+      - name: Verify downloadable skill package
+        run: |
+          sha256sum -c dist/rendriva-chatgpt-skill-v1.0.0.zip.sha256
+          unzip -t dist/rendriva-chatgpt-skill-v1.0.0.zip
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.0.0.zip | grep -qx 'SKILL.md'
