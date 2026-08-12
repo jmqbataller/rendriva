@@ -6,16 +6,29 @@ Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image
 
 ## Download for ChatGPT Skills
 
-[Download Rendriva ChatGPT Skill v1.6.0](https://github.com/jmqbataller/rendriva/releases/latest/download/rendriva-chatgpt-skill-v1.6.0.zip)
+[Download Rendriva ChatGPT Skill v1.6.1](https://github.com/jmqbataller/rendriva/releases/latest/download/rendriva-chatgpt-skill-v1.6.1.zip)
 
 This upload-ready ZIP has `SKILL.md` at the archive root.
 
 1. Download the ZIP.
 2. Open the ChatGPT Skills upload flow.
-3. Select `rendriva-chatgpt-skill-v1.6.0.zip`.
+3. Select `rendriva-chatgpt-skill-v1.6.1.zip`.
 4. Review the skill details, then confirm the upload.
 
-Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256)
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.6.1.zip.sha256)
+
+## Use in any ChatGPT conversation
+
+Rendriva works directly in an ordinary chat; Work mode and job files are not required. Ask naturally, attach references when needed, and Rendriva will use the chat's image-generation tools automatically. You can invoke it explicitly with `@Rendriva`, but normal image requests can trigger it implicitly.
+
+Examples:
+
+- `Generate 5 separate Shopee banner variants using my attached product image.`
+- `Gawan ng model ang bawat color variant. Isang mukha lang sa lahat.`
+- `Same face as my uploaded photo. Change only the outfit and background.`
+- `Another batch, same product, brand colors, and 9:16 ratio.`
+
+Uploads and conversation references are available only while ChatGPT can access them in the active conversation. Reattach the authoritative reference when starting a new chat.
 
 ## What Rendriva does
 
@@ -166,4 +179,4 @@ python -m unittest discover -s rendriva-image-agent/scripts/tests -v
 
 ## Status
 
-Rendriva v1.6 is ready for controlled testing with real image-generation credentials. Live face consistency, SKU accuracy, photorealism, and product preservation still depend on the selected model, source quality, prompt constraints, and human approval for high-stakes commerce work.
+Rendriva v1.6.1 supports ordinary ChatGPT conversations, explicit or implicit invocation, attached-image edits, and conversational follow-ups in addition to the deterministic adapter. Live face consistency, SKU accuracy, photorealism, and product preservation still depend on the selected model, source quality, prompt constraints, and human approval for high-stakes commerce work.

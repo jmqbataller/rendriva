@@ -4,8 +4,8 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "dist/rendriva-chatgpt-skill-v1.6.0.zip"
-      - "dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256"
+      - "dist/rendriva-chatgpt-skill-v1.6.1.zip"
+      - "dist/rendriva-chatgpt-skill-v1.6.1.zip.sha256"
       - ".github/workflows/release.yml"
 
 permissions:
@@ -19,17 +19,17 @@ jobs:
         uses: actions/checkout@v4
       - name: Verify release package
         run: |
-          sha256sum -c dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256
-          unzip -t dist/rendriva-chatgpt-skill-v1.6.0.zip
-          unzip -Z1 dist/rendriva-chatgpt-skill-v1.6.0.zip | grep -qx 'SKILL.md'
+          sha256sum -c dist/rendriva-chatgpt-skill-v1.6.1.zip.sha256
+          unzip -t dist/rendriva-chatgpt-skill-v1.6.1.zip
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.6.1.zip | grep -qx 'SKILL.md'
       - name: Publish GitHub Release with installable ZIP
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "v1.6.0" >/dev/null 2>&1 && exit 0
-          gh release create "v1.6.0" \
-            dist/rendriva-chatgpt-skill-v1.6.0.zip \
-            dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256 \
+          gh release view "v1.6.1" >/dev/null 2>&1 && exit 0
+          gh release create "v1.6.1" \
+            dist/rendriva-chatgpt-skill-v1.6.1.zip \
+            dist/rendriva-chatgpt-skill-v1.6.1.zip.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Rendriva v1.6.0 — Commerce Production Suite" \
-            --notes "Adds exact SKU-to-output mapping, garment construction and product visibility locks, reference preflight, rollback-safe localized repair, SKU color QA, commerce shot direction, approval checkpoints, campaign defect memory, and video continuity handoff. Includes Single Model Face Lock and all prior production controls."
+            --title "Rendriva v1.6.1 — Chat-Ready Image Agent" \
+            --notes "Adds direct use in ordinary ChatGPT conversations, automatic natural-language triggering, attached-image and follow-up context handling, inline separate-image delivery, and explicit ChatGPT implicit-invocation support. Includes the complete v1.6 commerce production suite."

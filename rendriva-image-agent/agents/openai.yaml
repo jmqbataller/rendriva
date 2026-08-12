@@ -1,6 +1,13 @@
 interface:
   display_name: "Rendriva"
-  short_description: "Commerce-ready image campaigns with exact locks"
-  default_prompt: "Use $rendriva-image-agent to create separate professional campaign images with exact face, SKU, garment, color, visibility, brand, and repair controls."
+  short_description: "Professional images directly in any ChatGPT chat"
+  default_prompt: "Use $rendriva-image-agent in this chat to create five separate professional images from my prompt or attached references, preserving exact product, logo, color, fabric, and face details."
   icon_small: "./assets/icon.svg"
   icon_large: "./assets/icon.svg"
+policy:
+  products:
+    - "chatgpt"
+    - "codex"
+    - "api"
+    - "atlas"
+  allow_implicit_invocation: true

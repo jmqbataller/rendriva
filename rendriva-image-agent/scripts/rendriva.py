@@ -63,7 +63,7 @@ from rendriva_commerce import (  # noqa: E402
 )
 
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
