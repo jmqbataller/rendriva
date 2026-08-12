@@ -31,6 +31,7 @@ jobs:
         run: python rendriva-image-agent/scripts/rendriva.py rendriva-image-agent/scripts/example-job.json --dry-run
       - name: Verify downloadable skill package
         run: |
-          sha256sum -c dist/rendriva-chatgpt-skill-v1.0.0.zip.sha256
-          unzip -t dist/rendriva-chatgpt-skill-v1.0.0.zip
-          unzip -Z1 dist/rendriva-chatgpt-skill-v1.0.0.zip | grep -qx 'SKILL.md'
+          sha256sum -c dist/rendriva-chatgpt-skill-v1.1.0.zip.sha256
+          unzip -t dist/rendriva-chatgpt-skill-v1.1.0.zip
+          unzip -Z1 dist/rendriva-chatgpt-skill-v1.1.0.zip | grep -qx 'SKILL.md'
+          unzip -p dist/rendriva-chatgpt-skill-v1.1.0.zip scripts/rendriva.py | grep -q 'VERSION = "1.1.0"'

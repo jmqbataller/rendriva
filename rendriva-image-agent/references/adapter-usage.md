@@ -58,6 +58,8 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Use independent generation requests for scene mode.
 - Apply exact text layers after generation.
 - Composite optional transparent `locked_layers` before typography for source-derived product accuracy.
+- Default reference jobs to strict fidelity, protecting product construction, material, fabric texture, print, labels, color, proportions, and exact logo geometry.
+- Record each locked layer's role and SHA-256 source fingerprint in the manifest; never generatively repair inside a source-derived layer.
 - Run structural checks and, by default, a vision-based professional-design judge.
 - Regenerate only an item marked `NEEDS_REPAIR`, once by default.
 - Persist progress after every material step so `--resume` skips completed items.
@@ -73,3 +75,5 @@ When the host exposes a native image-generation tool, call it separately for eac
 - `NEEDS_REPAIR`: a repairable defect remains before the allowed retry.
 - `FAILED`: generation or judging failed after allowed retries.
 - `BLOCKED`: policy, missing tool, missing key, or unavailable capability prevented generation.
+
+Strict generative reference jobs cannot receive `PASS` when the comparison judge is disabled. Source-derived `locked_layers` provide the literal-preservation path; ordinary reference edits remain high-fidelity generation and must not be described as pixel-identical.

@@ -1,8 +1,9 @@
 interface:
   display_name: Rendriva
-  short_description: Professional separate-image batch generation
+  short_description: Professional batches with strict product fidelity
   default_prompt: Use $rendriva-image-agent to generate a professional batch of separate
-    images without making a collage.
+    images without a collage while preserving supplied product fabric, texture, and
+    logos exactly.
   icon_small: assets/icon.svg
   icon_large: assets/icon.svg
 policy:

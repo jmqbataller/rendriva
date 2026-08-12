@@ -6,16 +6,16 @@ Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image
 
 ## Download for ChatGPT Skills
 
-[Download Rendriva ChatGPT Skill v1.0.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.0.0.zip)
+[Download Rendriva ChatGPT Skill v1.1.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.1.0.zip)
 
 This upload-ready ZIP has `SKILL.md` at the archive root.
 
 1. Download the ZIP.
 2. Open the ChatGPT Skills upload flow.
-3. Select `rendriva-chatgpt-skill-v1.0.0.zip`.
+3. Select `rendriva-chatgpt-skill-v1.1.0.zip`.
 4. Review the skill details, then confirm the upload.
 
-Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.0.0.zip.sha256)
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.1.0.zip.sha256)
 
 ## What Rendriva does
 
@@ -26,7 +26,10 @@ Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.0.0.zip.sha25
 - Judges every output independently for instructions, composition, hierarchy, brand consistency, realism, artifacts, and commercial usability
 - Repairs only the failed image while preserving passing outputs
 - Compares generated outputs with supplied reference images
-- Supports source-derived `locked_layers` for transparent products or artwork that should not be redrawn
+- Defaults supplied product and logo references to strict fidelity
+- Protects fabric weave, texture, stitching, construction, print, color, proportions, labels, and exact logo geometry
+- Supports source-derived `locked_layers` for transparent products, artwork, and logos that must not be redrawn
+- Records locked-asset roles and SHA-256 source fingerprints in the manifest
 - Adds critical poster and advertisement copy programmatically for exact spelling
 - Produces individual files, `manifest.json`, `quality-report.json`, and `rendriva-output.zip`
 - Preserves partial success and resumes interrupted jobs without repeating completed images
@@ -128,7 +131,7 @@ The quality judge requires all non-negotiable gates to pass and a professional-d
 
 ## Reference accuracy
 
-Generative reference editing reduces drift but cannot promise pixel-identical reproduction. When literal product or artwork preservation matters, supply a transparent source asset through `locked_layers`; Rendriva generates the surrounding design and composites the source-derived layer afterward.
+Reference jobs now default to strict fidelity. Any visible drift in product material, fabric texture, stitching, construction, print, color, label, proportions, or logo geometry fails the quality gate. Generative editing remains high fidelity rather than pixel-identical; for literal preservation, supply transparent product and logo assets through `locked_layers` so Rendriva generates only the surrounding design and composites the source-derived assets afterward.
 
 ## Security
 
@@ -146,8 +149,9 @@ The included test suite covers:
 - Scene and variation planning
 - Partial failures
 - Targeted repair
-- Reference-aware judging
-- Locked-layer compositing
+- Strict product, fabric, texture, and logo fidelity gates
+- Reference-aware judging that cannot pass unverified strict edits
+- Source-fingerprint-aware locked-layer compositing
 - Exact text expectations
 - Resume and duplicate-job protection
 - ZIP packaging
@@ -160,4 +164,4 @@ python -m unittest discover -s rendriva-image-agent/scripts/tests -v
 
 ## Status
 
-Rendriva v1 is ready for controlled testing with real image-generation credentials. Live output quality still depends on the selected model, references, prompt constraints, and human review for high-stakes brand or product work.
+Rendriva v1.1 is ready for controlled testing with real image-generation credentials. Live output quality still depends on the selected model, references, prompt constraints, and human review for high-stakes brand or product work.

@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - handled with a focused runtime error
     Image = ImageColor = ImageDraw = ImageFont = None
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_JUDGE_MODEL = "gpt-5.5"
 VALID_FORMATS = {"png", "jpeg", "webp"}
@@ -39,7 +39,15 @@ VALID_QUALITIES = {"low", "medium", "high", "auto"}
 VALID_BACKGROUNDS = {"opaque", "transparent", "auto"}
 VALID_MODES = {"variations", "scenes"}
 VALID_OPERATIONS = {"generate", "edit", "variation"}
+VALID_FIDELITY_MODES = {"none", "guided", "strict"}
 VALID_STATUSES = {"QUEUED", "GENERATING", "JUDGING", "NEEDS_REPAIR", "REPAIRING", "PASS", "FAILED", "BLOCKED"}
+
+STRICT_ASSET_LOCKS = [
+    "source product silhouette, proportions, construction, dimensions, and edge geometry",
+    "source material, fabric weave, texture, finish, stitching, folds, print, and color",
+    "source logo geometry, lettering, spacing, colors, placement, and aspect ratio",
+    "source labels, marks, and identifiers without redraw, recolor, retexture, reshaping, or invented detail",
+]
 
 PRESETS: dict[str, dict[str, Any]] = {
     "product-photography": {
@@ -175,6 +183,7 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
         resolved_path = resolve_paths([path_value], base_dir)[0]
         layer = {
             "path": resolved_path,
+            "role": str(raw_layer.get("role", "product")),
             "x": float(raw_layer.get("x", 0.5)),
             "y": float(raw_layer.get("y", 0.5)),
             "max_width": float(raw_layer.get("max_width", 0.45)),
@@ -182,6 +191,10 @@ def normalize_locked_layers(value: Any, base_dir: Path) -> list[dict[str, Any]]:
             "anchor": raw_layer.get("anchor", "center"),
             "require_alpha": bool(raw_layer.get("require_alpha", True)),
         }
+        if layer["role"] not in {"product", "logo", "artwork", "identity", "protected-asset"}:
+            raise ValidationError(
+                f"locked_layers[{index}].role must be product, logo, artwork, identity, or protected-asset."
+            )
         for key in ("x", "y", "max_width", "max_height"):
             if not 0 <= layer[key] <= 1:
                 raise ValidationError(f"locked_layers[{index}].{key} must be from 0 through 1.")
@@ -248,6 +261,15 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
     if operation in {"edit", "variation"} and not references:
         raise ValidationError(f"operation='{operation}' requires at least one reference image.")
 
+    fidelity_mode = str(raw.get("fidelity_mode", "strict" if references or locked_layers else "none"))
+    if fidelity_mode not in VALID_FIDELITY_MODES:
+        raise ValidationError(f"fidelity_mode must be one of: {', '.join(sorted(VALID_FIDELITY_MODES))}.")
+    if fidelity_mode != "none" and not references and not locked_layers:
+        raise ValidationError("fidelity_mode requires reference_images or locked_layers.")
+    preserve = as_string_list(raw.get("preserve"), "preserve")
+    if fidelity_mode == "strict":
+        preserve = list(dict.fromkeys(preserve + STRICT_ASSET_LOCKS))
+
     brand = raw.get("brand", {})
     if not isinstance(brand, dict):
         raise ValidationError("brand must be an object.")
@@ -288,7 +310,8 @@ def normalize_job(raw: dict[str, Any], base_dir: Path | None = None) -> dict[str
         "background": background,
         "reference_images": references,
         "locked_layers": locked_layers,
-        "preserve": as_string_list(raw.get("preserve"), "preserve"),
+        "fidelity_mode": fidelity_mode,
+        "preserve": preserve,
         "avoid": as_string_list(raw.get("avoid"), "avoid"),
         "brand": brand,
         "professional_designer_mode": bool(raw.get("professional_designer_mode", True)),
@@ -381,7 +404,7 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
     locked_layer_rule = "No source-composited layer is configured."
     if spec["locked_layers"]:
         placements = [
-            f"layer {index}: reserve a clean unobstructed zone around ({layer['x']:.2f}, {layer['y']:.2f}) with maximum width {layer['max_width']:.2f} and height {layer['max_height']:.2f}"
+            f"{layer['role']} layer {index}: reserve a clean unobstructed zone around ({layer['x']:.2f}, {layer['y']:.2f}) with maximum width {layer['max_width']:.2f} and height {layer['max_height']:.2f}"
             for index, layer in enumerate(spec["locked_layers"], start=1)
         ]
         locked_layer_rule = (
@@ -390,6 +413,21 @@ def compile_prompt(spec: dict[str, Any], item: dict[str, Any], repair: dict[str,
             "The unchanged source-derived layer will be composited afterward. "
             + "; ".join(placements)
             + ". Keep every reserved zone free of conflicting objects, fake shadows, or duplicate products."
+        )
+    fidelity_rule = "No source asset is supplied."
+    if spec["fidelity_mode"] == "guided":
+        fidelity_rule = (
+            "Use the source as a visual reference, but treat fidelity as guided rather than literal. "
+            "Do not claim pixel-identical preservation."
+        )
+    elif spec["fidelity_mode"] == "strict":
+        strategy = "literal source compositing" if spec["locked_layers"] else "strict reference editing with mandatory comparison QA"
+        fidelity_rule = (
+            f"Use {strategy}. The supplied product, garment, artwork, or logo is authoritative and protected. "
+            "Do not redraw, reinterpret, retouch, recolor, reshape, restyle, retexture, smooth, sharpen, replace, or invent any protected detail. "
+            "Keep fabric weave, fibers, stitching, seams, folds, finish, print, color, silhouette, proportions, labels, and product construction unchanged. "
+            "Keep every logo's exact symbol, lettering, geometry, spacing, color, aspect ratio, and placement unchanged; never approximate it with generated text. "
+            "If the requested transformation conflicts with a protected asset, preserve the asset and modify only the background, staging, lighting environment, layout, or unprotected region."
         )
     if item.get("batch_variations"):
         scene = (
@@ -427,6 +465,9 @@ BRAND DIRECTION:
 REFERENCE LOCKS:
 Preserve these details exactly where applicable: {_join(spec['preserve'])}.
 Do not invent product features, logos, wording, accessories, achievements, or brand details.
+
+REFERENCE FIDELITY POLICY ({spec['fidelity_mode'].upper()}):
+{fidelity_rule}
 
 SOURCE COMPOSITE POLICY:
 {locked_layer_rule}
@@ -642,12 +683,23 @@ def quality_schema() -> dict[str, Any]:
 
 def quality_prompt(spec: dict[str, Any], generation_prompt: str) -> str:
     expected_text = [layer["text"] for layer in spec["text_layers"]]
+    fidelity_gate = "No reference-fidelity gate applies."
+    if spec["fidelity_mode"] == "guided":
+        fidelity_gate = "Assess reference similarity as guidance and report material drift, but do not require literal source identity."
+    elif spec["fidelity_mode"] == "strict":
+        fidelity_gate = (
+            "STRICT SOURCE-ASSET GATE: mark reference_preservation false and fail the gates for any change to product silhouette, proportions, construction, fabric weave, fibers, texture, finish, stitching, seams, folds, print, color, label, or logo. "
+            "A logo fails for altered symbol geometry, lettering, spelling, spacing, color, aspect ratio, placement, cropping, distortion, redraw, or generated approximation. "
+            "Do not excuse drift because the result is visually attractive."
+        )
     return f"""Act as a strict senior design director and production QA reviewer. Evaluate the final attached image against the generation brief and any authoritative source references supplied after this instruction.
 
 BRIEF:
 {generation_prompt}
 
 Fail the gates if the image is a collage/grid/multi-panel output, misses required content, changes locked reference details, contains severe visual artifacts, crops the main subject unintentionally, invents prohibited brand/product details, or renders critical text incorrectly. The exact required text strings are: {_join(expected_text)}. If no reference or critical text applies, mark that gate true.
+
+{fidelity_gate}
 
 Score visual hierarchy, composition and spacing, brand consistency, realism and artifact control, commercial usability, and originality/restraint from 0 to 5. Generic AI aesthetics, random glow, pseudo-text, plastic texture, clutter, incoherent shadows, and template-like styling must reduce the relevant scores unless explicitly requested.
 
@@ -729,9 +781,13 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
         applied.append(
             {
                 "path": layer["path"],
+                "role": layer["role"],
+                "source_sha256": hashlib.sha256(Path(layer["path"]).read_bytes()).hexdigest(),
                 "position": [x, y],
                 "size": [target[0], target[1]],
                 "source_alpha": has_alpha,
+                "source_derived": True,
+                "generatively_redrawn": False,
             }
         )
     output_format = image_path.suffix.lower().lstrip(".")
@@ -739,7 +795,12 @@ def apply_locked_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[
         canvas.convert("RGB").save(image_path, format="JPEG", quality=95)
     else:
         canvas.save(image_path, format=output_format.upper())
-    return {"applied": True, "layers": applied}
+    return {
+        "applied": True,
+        "layers": applied,
+        "strategy": "literal-source-composite",
+        "protected_source_count": len(applied),
+    }
 
 
 def apply_text_layers(image_path: Path, layers: list[dict[str, Any]]) -> dict[str, Any]:
@@ -831,6 +892,19 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
             "vision": vision,
         }
     if vision is None:
+        strict_reference_unverified = (
+            spec["fidelity_mode"] == "strict" and bool(spec["reference_images"]) and not spec["locked_layers"]
+        )
+        if strict_reference_unverified:
+            return {
+                "passed": False,
+                "average_score": None,
+                "defects": ["Strict generative reference fidelity was not verified because the vision judge is disabled."],
+                "repair_prompt": "Enable reference-aware vision judging or use locked_layers for source-derived compositing.",
+                "structural": structural,
+                "vision": None,
+                "evidence_note": "Strict fidelity cannot pass without comparison evidence.",
+            }
         return {
             "passed": True,
             "average_score": None,
@@ -844,6 +918,8 @@ def finalize_review(spec: dict[str, Any], structural: dict[str, Any], vision: di
     values = [float(scores.get(name, 0)) for name in SCORED_DIMENSIONS]
     average = sum(values) / len(values)
     gates = bool(vision.get("gates_pass")) and not bool(vision.get("collage_violation"))
+    if spec["fidelity_mode"] == "strict" and (spec["reference_images"] or spec["locked_layers"]):
+        gates = gates and bool(vision.get("reference_preservation"))
     passed = gates and average >= spec["min_professional_score"]
     defects.extend(str(value) for value in vision.get("defects", []))
     if average < spec["min_professional_score"]:
@@ -1042,6 +1118,19 @@ def create_manifest(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
         "job_id": job_id,
         "created_at": now,
         "updated_at": now,
+        "fidelity": {
+            "mode": spec["fidelity_mode"],
+            "strategy": (
+                "literal-source-composite"
+                if spec["locked_layers"]
+                else "strict-generative-reference"
+                if spec["fidelity_mode"] == "strict" and spec["reference_images"]
+                else "guided-reference"
+                if spec["fidelity_mode"] == "guided"
+                else "none"
+            ),
+            "literal_source_preservation": bool(spec["locked_layers"]),
+        },
         "spec": spec,
         "outputs": build_plan(spec),
     }

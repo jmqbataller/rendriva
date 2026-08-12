@@ -84,6 +84,25 @@ class RendrivaTests(unittest.TestCase):
         self.assertIn("do not create a collage", prompt.lower())
         self.assertIn("professional designer", prompt.lower())
 
+    def test_reference_defaults_to_strict_product_and_logo_fidelity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "product-logo.png"
+            rendriva.Image.new("RGB", (64, 64), (80, 60, 40)).save(reference)
+            spec = rendriva.normalize_job(
+                base_job(operation="edit", reference_images=[str(reference)])
+            )
+        self.assertEqual(spec["fidelity_mode"], "strict")
+        self.assertTrue(any("fabric weave" in lock for lock in spec["preserve"]))
+        self.assertTrue(any("logo geometry" in lock for lock in spec["preserve"]))
+        prompt = rendriva.compile_prompt(spec, rendriva.build_plan(spec)[0])
+        self.assertIn("do not redraw", prompt.lower())
+        self.assertIn("fabric weave", prompt.lower())
+        self.assertIn("logo's exact symbol", prompt.lower())
+
+    def test_strict_fidelity_requires_a_source_asset(self):
+        with self.assertRaises(rendriva.ValidationError):
+            rendriva.normalize_job(base_job(fidelity_mode="strict"))
+
     def test_dry_plan_is_stable(self):
         spec = rendriva.normalize_job(base_job(count=3))
         self.assertEqual(rendriva.stable_job_id(spec), rendriva.stable_job_id(spec))
@@ -169,6 +188,11 @@ class RendrivaTests(unittest.TestCase):
             draw = rendriva.ImageDraw.Draw(layer)
             draw.rectangle((20, 20, 180, 280), fill=(220, 30, 30, 255))
             layer.save(layer_path)
+            logo_path = root / "logo.png"
+            logo = rendriva.Image.new("RGBA", (120, 40), (0, 0, 0, 0))
+            logo_draw = rendriva.ImageDraw.Draw(logo)
+            logo_draw.rectangle((4, 4, 116, 36), fill=(20, 20, 20, 255))
+            logo.save(logo_path)
             spec = rendriva.normalize_job(
                 base_job(
                     locked_layers=[
@@ -179,6 +203,15 @@ class RendrivaTests(unittest.TestCase):
                             "max_width": 0.35,
                             "max_height": 0.7,
                             "anchor": "center",
+                        },
+                        {
+                            "path": str(logo_path),
+                            "role": "logo",
+                            "x": 0.08,
+                            "y": 0.08,
+                            "max_width": 0.2,
+                            "max_height": 0.12,
+                            "anchor": "top-left",
                         }
                     ]
                 )
@@ -186,7 +219,14 @@ class RendrivaTests(unittest.TestCase):
             _, manifest = rendriva.execute(spec, root / "runs", rendriva.MockProvider())
             composite = manifest["outputs"][0]["locked_layer_composite"]
             self.assertTrue(composite["applied"])
-            self.assertEqual(len(composite["layers"]), 1)
+            self.assertEqual(len(composite["layers"]), 2)
+            self.assertEqual(composite["strategy"], "literal-source-composite")
+            self.assertEqual(composite["layers"][0]["role"], "product")
+            self.assertEqual(composite["layers"][1]["role"], "logo")
+            self.assertEqual(len(composite["layers"][0]["source_sha256"]), 64)
+            self.assertTrue(composite["layers"][0]["source_derived"])
+            self.assertFalse(composite["layers"][0]["generatively_redrawn"])
+            self.assertTrue(manifest["fidelity"]["literal_source_preservation"])
 
     def test_reference_and_locked_layers_cannot_be_combined(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -231,6 +271,31 @@ class RendrivaTests(unittest.TestCase):
         prompt = rendriva.quality_prompt(spec, "generation prompt")
         self.assertIn("PAYDAY SALE", prompt)
         self.assertIn("₱299", prompt)
+
+    def test_strict_reference_cannot_pass_without_comparison_judge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "product.png"
+            output = root / "output.png"
+            rendriva.Image.new("RGB", (1024, 1024), (10, 10, 10)).save(reference)
+            rendriva.Image.new("RGB", (1024, 1024), (20, 20, 20)).save(output)
+            spec = rendriva.normalize_job(
+                base_job(operation="edit", reference_images=[str(reference)])
+            )
+            review = rendriva.finalize_review(spec, rendriva.structural_review(spec, output), None)
+        self.assertFalse(review["passed"])
+        self.assertIn("not verified", review["defects"][0].lower())
+
+    def test_reference_preservation_false_fails_strict_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "logo.png"
+            rendriva.Image.new("RGB", (64, 64), (10, 10, 10)).save(reference)
+            spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(reference)]))
+        structural = {"passed": True, "defects": [], "metadata": {}}
+        vision = rendriva.MockProvider().judge(spec, Path("unused.png"), "prompt")
+        vision["reference_preservation"] = False
+        review = rendriva.finalize_review(spec, structural, vision)
+        self.assertFalse(review["passed"])
 
 
 if __name__ == "__main__":

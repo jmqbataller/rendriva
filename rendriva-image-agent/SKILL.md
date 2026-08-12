@@ -1,6 +1,6 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, and any request for multiple individually downloadable images. Apply professional art direction, reference locks, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, and any request for multiple individually downloadable images. Apply professional art direction, strict source-asset locks for product fabric, texture, construction, print, and logos, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
@@ -60,11 +60,16 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 ## Preserve references
 
 - Reuse every required reference in each dependent generation or edit.
-- Lock identity, face, product silhouette, proportions, color, fabric, texture, print, logo, readable label, count, placement, and background when the user requires them.
+- Default to strict fidelity whenever the user supplies a product, garment, artwork, label, or logo image. Treat the supplied asset as authoritative, not as loose inspiration.
+- Lock identity, face, product silhouette, proportions, construction, color, fabric weave, fibers, texture, finish, stitching, seams, folds, print, logo, readable label, count, placement, and aspect ratio when the user requires them.
+- Never redraw, reinterpret, retouch, recolor, reshape, restyle, smooth, sharpen, retexture, replace, or invent any protected product or logo detail. Never approximate a supplied logo with generated text or a visually similar mark.
+- For background, ad-layout, poster, or mockup changes, modify only the environment and unprotected regions. Keep the protected asset out of the generative edit whenever possible.
 - Put the most important reference first when the provider gives the first reference extra fidelity.
 - Prefer editing over fresh generation for localized changes.
-- Use `locked_layers` instead of generative reference editing when the source artwork or product must remain source-derived and can be supplied as a transparent image. Generate only the background, then composite the locked layer before typography.
-- State that high-fidelity generation reduces drift but cannot guarantee pixel-identical reproduction.
+- Use `locked_layers` for products and always for logos when literal preservation is required and a transparent source is available. Generate only the background, then composite the unchanged source-derived layer before typography. Record the source fingerprint in the manifest.
+- If the source is not suitable for literal compositing, use strict reference editing plus comparison QA. Do not mark the output `PASS` when texture, fabric, construction, print, label, or logo fidelity cannot be verified.
+- If a requested new angle, pose, fold, or view necessarily exposes unseen product detail, explain that literal preservation is impossible; ask for a matching source view or label the result as generative rather than exact.
+- Never promise pixel-identical reproduction from generative editing. Claim literal source preservation only for source-derived compositing.
 
 ## Handle text professionally
 
@@ -79,10 +84,11 @@ For every output:
 
 1. Generate or edit the image.
 2. Inspect instruction following, reference preservation, composition, hierarchy, typography, realism, artifacts, commercial usability, and collage violations.
-3. Assign `PASS`, `NEEDS_REPAIR`, `FAILED`, or `BLOCKED`.
-4. Repair only the failed item, with a defect-specific repair prompt.
-5. Perform at most one automatic repair attempt unless the user explicitly authorizes more.
-6. Keep the better result and record the decision.
+3. Under strict fidelity, fail the non-negotiable gate for any product material, fabric, construction, print, label, color, proportion, or logo drift—even if the result is attractive.
+4. Assign `PASS`, `NEEDS_REPAIR`, `FAILED`, or `BLOCKED`.
+5. Repair only the failed item, with a defect-specific repair prompt.
+6. Perform at most one automatic repair attempt unless the user explicitly authorizes more.
+7. Keep the better result and record the decision.
 
 Require all non-negotiable gates to pass and an average professional-design score of at least `4/5`. Do not label an output `PASS` only because it is visually attractive.
 

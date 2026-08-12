@@ -5,9 +5,10 @@
 1. Minimal variation job
 2. Scene-list job
 3. Reference and brand locks
-4. Literal source compositing
-5. Exact text layers
-6. Supported fields
+4. Strict product and logo fidelity
+5. Literal source compositing
+6. Exact text layers
+7. Supported fields
 
 ## Minimal variation job
 
@@ -38,6 +39,25 @@
   "professional_designer_mode": true
 }
 ```
+
+Reference jobs default to `"fidelity_mode": "strict"`. Use `"guided"` only when the source is inspiration and controlled variation is allowed.
+
+## Strict product and logo fidelity
+
+```json
+{
+  "prompt": "Place this exact shirt in a premium marketplace banner",
+  "operation": "edit",
+  "reference_images": ["./shirt-front.png"],
+  "fidelity_mode": "strict",
+  "preserve": [
+    "exact shirt length and construction",
+    "exact fabric weave, texture, stitching, folds, print, and color"
+  ]
+}
+```
+
+Strict mode prohibits redraw, recolor, reshape, retexture, logo approximation, and invented product detail. The comparison judge must fail visible drift. A generative reference edit is high fidelity, not literal preservation. Use source-derived `locked_layers` whenever the original pixels must remain protected, and always use them for an exact supplied logo when a transparent source is available.
 
 When `scenes` is present, `count` defaults to its length and must match it when explicitly provided.
 
@@ -75,18 +95,29 @@ Use `locked_layers` when generative edits are not accurate enough and the produc
   "locked_layers": [
     {
       "path": "./shirt-transparent.png",
+      "role": "product",
       "x": 0.76,
       "y": 0.55,
       "max_width": 0.42,
       "max_height": 0.78,
       "anchor": "center",
       "require_alpha": true
+    },
+    {
+      "path": "./brand-logo.png",
+      "role": "logo",
+      "x": 0.08,
+      "y": 0.08,
+      "max_width": 0.22,
+      "max_height": 0.16,
+      "anchor": "top-left",
+      "require_alpha": true
     }
   ]
 }
 ```
 
-Do not combine `locked_layers` and `reference_images` in v1. A locked layer must use `operation: "generate"`. Scaling is proportional and source-derived, but resampling means it is not a claim of byte-for-byte pixel identity.
+Do not combine `locked_layers` and `reference_images` in the current adapter. A locked layer must use `operation: "generate"`. Scaling is proportional and source-derived, but resampling means it is not a claim of byte-for-byte pixel identity.
 
 ## Exact text layers
 
@@ -127,6 +158,8 @@ Do not combine `locked_layers` and `reference_images` in v1. A locked layer must
 | `background` | `opaque`, `transparent`, or `auto` |
 | `reference_images` | Local image paths used for edit/reference jobs |
 | `locked_layers` | Transparent source images composited after background generation |
+| `locked_layers[].role` | `product`, `logo`, `artwork`, `identity`, or `protected-asset` |
+| `fidelity_mode` | `strict`, `guided`, or `none`; defaults to `strict` when a source asset exists |
 | `preserve` | Non-negotiable details to retain |
 | `avoid` | Additional forbidden visual elements |
 | `brand` | Palette, tone, fonts, references, and avoid list |
