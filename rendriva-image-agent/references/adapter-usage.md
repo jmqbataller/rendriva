@@ -62,6 +62,9 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Automatically extract a usable brand palette from any supplied reference images. Prioritize a locked logo layer, then combine distinct colors from the remaining references.
 - Detect or accept explicit reference roles and views, then build multi-view product identity packs.
 - For fashion-model batches, approve one face anchor and reuse it sequentially for every later variant; compare each face and repair only identity drift.
+- Assign each output to one authoritative SKU, attach only that product variant, and enforce garment construction, product visibility, source color, and shot-role gates.
+- Inspect references before generation, carry campaign defects forward, and keep repair candidates rollback-safe when a passing locked region changes.
+- Optionally stop after one anchor for approval and export video-ready continuity keyframes after production.
 - Apply the derived palette only to unprotected design elements and record its colors plus source fingerprints in the manifest.
 - Load and emit reusable shop brand profiles; lock shared campaign tokens while enforcing distinct batch compositions.
 - Compare the complete campaign batch visually and repair only identified outliers when Campaign Vision Lock is enabled.
@@ -73,7 +76,7 @@ python scripts/rendriva.py job.json --no-vision-judge
 - Reject deterministic near-duplicates and create separate contain-scaled platform exports when requested.
 - Regenerate only an item marked `NEEDS_REPAIR`, once by default.
 - Persist progress after every material step so `--resume` skips completed items.
-- Package successful outputs, brand/fidelity/model-identity/diversity/campaign/draft-selection reports, and optional draft/platform exports into `rendriva-output.zip`.
+- Package successful outputs, brand/fidelity/model-identity/diversity/campaign/draft-selection/commerce/video-continuity reports, and optional draft/platform exports into `rendriva-output.zip`.
 
 ## Native ChatGPT behavior
 

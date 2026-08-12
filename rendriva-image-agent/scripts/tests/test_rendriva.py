@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import shutil
@@ -825,6 +826,103 @@ class RendrivaTests(unittest.TestCase):
             _, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider(), use_vision_judge=False)
         self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "FAILED"])
         self.assertFalse(manifest["model_identity_report"]["verified"])
+
+    def test_sku_variant_matrix_maps_every_output_to_one_authoritative_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = []
+            for name, color in (("black", "#111111"), ("beige", "#D8C4A0"), ("maroon", "#741D35")):
+                path = root / f"{name}-product.png"
+                rendriva.Image.new("RGB", (600, 600), color).save(path)
+                sources.append(path)
+            spec = rendriva.normalize_job(base_job(count=3, sku_variant_matrix={"variants": [
+                {"id": "SKU-BLK", "source_path": str(sources[0]), "expected_color": "black"},
+                {"id": "SKU-BGE", "source_path": str(sources[1]), "expected_color": "beige"},
+                {"id": "SKU-MRN", "source_path": str(sources[2]), "expected_color": "maroon"},
+            ]}))
+            plan = rendriva.build_plan(spec)
+        self.assertEqual([item["sku_assignment"]["variant_id"] for item in plan], ["SKU-BLK", "SKU-BGE", "SKU-MRN"])
+        self.assertEqual(len({item["sku_assignment"]["source_sha256"] for item in plan}), 3)
+        self.assertIn("Do not swap", rendriva.compile_prompt(spec, plan[0]))
+
+    def test_sku_matrix_rejects_unassigned_outputs_and_duplicate_assignments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "product.png"
+            rendriva.Image.new("RGB", (600, 600), "#222222").save(source)
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(count=2, sku_variant_matrix={"variants": [{"id": "SKU-1", "source_path": str(source), "output_indices": [1]}]}))
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(count=2, sku_variant_matrix={"variants": [
+                    {"id": "SKU-1", "source_path": str(source), "output_indices": [1, 2]},
+                    {"id": "SKU-2", "source_path": str(source), "output_indices": [2]},
+                ]}))
+
+    def test_commerce_gates_are_non_negotiable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "garment.png"
+            output = Path(temporary) / "output.png"
+            rendriva.Image.new("RGB", (1024, 1024), "#333333").save(source)
+            rendriva.Image.new("RGB", (1024, 1024), "#444444").save(output)
+            spec = rendriva.normalize_job(base_job(count=1, sku_variant_matrix={"variants": [{"id": "SKU-1", "source_path": str(source)}]}, product_visibility_guard={"min_visible_ratio": 0.9}))
+            vision = rendriva.MockProvider().judge(spec, output, "prompt")
+            vision["product_visibility_ratio"] = 0.6
+            vision["product_visibility_pass"] = False
+            review = rendriva.finalize_review(spec, rendriva.structural_review(spec, output), vision)
+        self.assertFalse(review["passed"])
+        self.assertTrue(any("visibility" in defect.lower() for defect in review["defects"]))
+
+    def test_reference_preflight_reports_low_resolution_and_can_block(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "tiny-product.png"
+            rendriva.Image.new("RGB", (80, 80), "#555555").save(reference)
+            warning_spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(reference)]))
+            self.assertFalse(warning_spec["reference_preflight"]["passed"])
+            with self.assertRaises(rendriva.ValidationError):
+                rendriva.normalize_job(base_job(operation="edit", reference_images=[str(reference)], reference_preflight={"min_edge": 512, "blocking": True}))
+
+    def test_shot_director_defect_memory_and_video_handoff_are_packaged(self):
+        spec = rendriva.normalize_job(base_job(count=3, shot_director=True, defect_memory={"entries": ["no padded chest contour"]}, video_continuity_pack=True))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            self.assertEqual([item["shot"] for item in manifest["outputs"]], ["hero", "full-body-front", "three-quarter"])
+            self.assertIn("no padded chest contour", manifest["outputs"][0]["compiled_prompt"])
+            self.assertTrue((job_dir / "commerce-production-report.json").is_file())
+            self.assertTrue((job_dir / "video-continuity-pack.json").is_file())
+            video = rendriva.json_load(job_dir / "video-continuity-pack.json")
+            self.assertEqual(len(video["keyframes"]), 3)
+            with zipfile.ZipFile(job_dir / "rendriva-output.zip") as archive:
+                self.assertIn("commerce-production-report.json", archive.namelist())
+                self.assertIn("video-continuity-pack.json", archive.namelist())
+
+    def test_unapproved_checkpoint_generates_only_anchor_and_blocks_paid_batch(self):
+        spec = rendriva.normalize_job(base_job(count=3, approval_checkpoint=True))
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir, manifest = rendriva.execute(spec, Path(temporary), rendriva.MockProvider())
+            self.assertEqual([item["status"] for item in manifest["outputs"]], ["PASS", "BLOCKED", "BLOCKED"])
+            self.assertTrue((job_dir / "image-01.png").is_file())
+            self.assertFalse((job_dir / "image-02.png").exists())
+            self.assertEqual(manifest["approval_checkpoint"]["status"], "AWAITING_APPROVAL")
+
+    def test_localized_repair_uses_failed_output_as_first_edit_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "product.png"
+            failed = root / "failed-output.png"
+            rendriva.Image.new("RGB", (1024, 1024), "#111111").save(reference)
+            rendriva.Image.new("RGB", (1024, 1024), "#222222").save(failed)
+            spec = rendriva.normalize_job(base_job(operation="edit", reference_images=[str(reference)]))
+            payload = rendriva.MockProvider().create(spec, "repair", n=1)[0]
+            captured = {}
+
+            def fake_request(url, api_key, **kwargs):
+                captured.update(kwargs)
+                return {"data": [{"b64_json": base64.b64encode(payload).decode()}]}
+
+            with patch.object(rendriva, "api_request", side_effect=fake_request):
+                result = rendriva.OpenAIProvider("test-key").repair(spec, "repair only the hand", failed, n=1)
+            body = captured["raw_body"]
+        self.assertEqual(len(result), 1)
+        self.assertLess(body.find(b'filename="failed-output.png"'), body.find(b'filename="product.png"'))
 
 
 if __name__ == "__main__":

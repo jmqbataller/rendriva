@@ -164,7 +164,7 @@ Do not combine `locked_layers` and `reference_images` in the current adapter. A 
 
 ## Advanced production controls
 
-Rendriva 1.5 supports Single Model Face Lock, automatic reference roles, multi-view product identity packs, verified Campaign Vision Lock, product-region truth maps, draft-to-final promotion, batch diversity, cutout/shadow compositing, reusable brand profiles, platform export packs, fidelity reporting, responsive exact typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
+Rendriva 1.6 supports Single Model Face Lock, SKU Variant Matrix, garment construction and product visibility locks, reference preflight, rollback-safe localized repair, SKU color QA, commerce shot direction, approval checkpoints, defect memory, video continuity handoff, automatic reference roles, multi-view product identity packs, verified Campaign Vision Lock, truth maps, draft promotion, batch diversity, compositing, reusable brand profiles, platform exports, responsive typography, and marketplace conversion goals. See [advanced-features.md](advanced-features.md) for complete examples and constraints.
 
 ## Supported fields
 
@@ -206,6 +206,16 @@ Rendriva 1.5 supports Single Model Face Lock, automatic reference roles, multi-v
 | `model_identity_lock` | Same-person face anchor for every model variant; automatic for multi-image `fashion-model` jobs |
 | `model_identity_lock.source_path` | Optional single authoritative face reference; otherwise the first approved model becomes the anchor |
 | `model_identity_lock.min_confidence` | Face-comparison threshold from `0..1`; defaults to `0.80` |
+| `sku_variant_matrix` | Exact one-SKU-per-output mapping using authoritative sources, fingerprints, expected colors, and optional output indices |
+| `garment_construction_lock` | Lock garment structure and prevent unseen or invented neckline, sleeve, hem, seam, pocket, strap, silhouette, fit, print, or label details |
+| `product_visibility_guard` | Minimum visible-product ratio plus details protected from hands, hair, props, accessories, and cropping |
+| `reference_preflight` | Decode and resolution inspection; set `blocking: true` to stop before generation when a source fails |
+| `localized_repair` | Smallest-zone repair with preservation of passing regions and rollback on protected-lock drift |
+| `sku_color_guard` | Product identity-color verification separated from lighting, with a recorded ΔE tolerance |
+| `shot_director` | Per-output commerce shot roles such as hero, front, back, detail, lifestyle, and campaign finale |
+| `approval_checkpoint` | Generate only an anchor and hold later outputs until approval, or set `approved: true` for production |
+| `defect_memory` | Reuse prior observed or supplied rejection defects in later campaign prompts |
+| `video_continuity_pack` | Export approved keyframes and motion prompts with face, SKU, fabric, logo, color, and scene continuity locks |
 | `platform_exports` | Separate contain-scaled Shopee, Instagram, Facebook, website, or TikTok PNG exports |
 | `marketplace` | Conversion goal plus exact supplied price, discount, CTA, bundle count, and claims |
 | `max_repair_attempts` | Defaults to `1`; capped at `3` |

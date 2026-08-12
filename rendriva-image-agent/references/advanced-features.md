@@ -1,5 +1,21 @@
 # Rendriva advanced features
 
+## Contents
+
+- Reference Intelligence and multi-view identity
+- Batch diversity and campaign consistency
+- Single Model Face Lock
+- Commerce Production Suite
+- Product Region Truth Map
+- Draft-to-Final Workflow
+- Automatic cutout and natural shadow
+- Reusable brand profiles
+- Platform Export Pack
+- Reference Fidelity Report
+- Professional Typography Engine
+- Marketplace Conversion Mode
+- Output package
+
 Rendriva 1.5 adds Single Model Face Lock while retaining verified cross-image campaign review, product-region truth contracts, draft-to-final promotion, and the original one-to-ten separate-output contract.
 
 ## Reference Intelligence and multi-view identity
@@ -97,6 +113,43 @@ Without a supplied face, the first output must pass QA before it becomes the anc
 Each later generation receives the same anchor. Per-image QA compares facial identity while allowing requested changes to outfit, pose, expression, camera, lighting, and background. A different person, lookalike, blended identity, or materially changed facial structure fails the gate and triggers repair only for that output. `model-identity-report.json` records the anchor fingerprint, comparison confidence, observations, and verification status. If vision comparison is disabled, later outputs cannot claim verified face consistency.
 
 Runs made with the explicit mock provider exercise the workflow but keep `verified: false` and label their evidence synthetic; placeholder mock outputs do not establish real face fidelity.
+
+## Commerce Production Suite
+
+Rendriva 1.6 adds ten coordinated controls for fashion and product campaigns:
+
+```json
+{
+  "sku_variant_matrix": {
+    "variants": [
+      {"id": "SKU-BLACK", "source_path": "./black.png", "expected_color": "black"},
+      {"id": "SKU-BEIGE", "source_path": "./beige.png", "expected_color": "beige"}
+    ]
+  },
+  "garment_construction_lock": true,
+  "product_visibility_guard": {"min_visible_ratio": 0.9},
+  "reference_preflight": {"min_edge": 512, "blocking": true},
+  "localized_repair": {"rollback_on_lock_drift": true},
+  "sku_color_guard": {"delta_e_tolerance": 6},
+  "shot_director": {"shots": ["hero", "full-body-front"]},
+  "approval_checkpoint": {"approved": true},
+  "defect_memory": {"entries": ["no padded chest contour"]},
+  "video_continuity_pack": {"aspect_ratio": "9:16"}
+}
+```
+
+- **SKU Variant Matrix:** assign every output to exactly one authoritative product source. One variant per output is mapped automatically when variant count equals output count; otherwise provide `output_indices` or enable `auto_cycle` intentionally.
+- **Garment Construction Lock:** verify neckline, sleeves, hem, seams, stitching, pockets, buttons, straps, silhouette, length, fit, print, and labels. Flat-lay jobs can prohibit padded, molded, mannequin, cup, or body contours.
+- **Product Visibility Guard:** require a configurable visible-product ratio and protect important details from hands, hair, props, accessories, and cropping.
+- **Reference Preflight:** inspect decoding and dimensions before generation. The default reports warnings; set `blocking: true` to stop before API spending when a source fails.
+- **Localized Repair with Rollback:** target the smallest defective area and reject a repair candidate if a previously passing identity, product, logo, construction, color, or typography region changes.
+- **SKU Color Guard:** distinguish scene lighting from the product's identity color and record the configured visual color tolerance.
+- **Shot Director:** assign deliberate commerce coverage roles instead of random variations. Supported roles are `hero`, `full-body-front`, `three-quarter`, `back-view`, `product-detail`, `lifestyle`, `fabric-detail`, `side-view`, `catalogue-front`, and `campaign-finale`.
+- **Approval Checkpoint:** when enabled but unapproved, generate only the selected anchor output and mark the remaining batch as awaiting approval. Start the approved production job with the accepted anchor as the face/model source.
+- **Campaign Defect Memory:** add observed QA defects to later prompts within the same run and cap the retained list with `max_entries`.
+- **Video Continuity Pack:** create `video-continuity-pack.json` containing approved keyframes, shot roles, SKU fingerprints, and first-to-last-frame preservation prompts.
+
+The batch judge also compares SKU assignment, garment construction, product visibility, and source color across passing outputs. `commerce-production-report.json` records the evidence per image.
 
 ## Product Region Truth Map
 

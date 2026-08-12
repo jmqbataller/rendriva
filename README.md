@@ -6,16 +6,16 @@ Rendriva is an installable ChatGPT Agent Skill plus a deterministic OpenAI Image
 
 ## Download for ChatGPT Skills
 
-[Download Rendriva ChatGPT Skill v1.5.0](https://github.com/jmqbataller/rendriva/raw/refs/heads/main/dist/rendriva-chatgpt-skill-v1.5.0.zip)
+[Download Rendriva ChatGPT Skill v1.6.0](https://github.com/jmqbataller/rendriva/releases/latest/download/rendriva-chatgpt-skill-v1.6.0.zip)
 
 This upload-ready ZIP has `SKILL.md` at the archive root.
 
 1. Download the ZIP.
 2. Open the ChatGPT Skills upload flow.
-3. Select `rendriva-chatgpt-skill-v1.5.0.zip`.
+3. Select `rendriva-chatgpt-skill-v1.6.0.zip`.
 4. Review the skill details, then confirm the upload.
 
-Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.5.0.zip.sha256)
+Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.6.0.zip.sha256)
 
 ## What Rendriva does
 
@@ -28,6 +28,12 @@ Integrity check: [SHA-256 checksum](dist/rendriva-chatgpt-skill-v1.5.0.zip.sha25
 - Automatically derives the shop palette from supplied reference images and prioritizes the logo
 - Protects product fabric, weave, texture, stitching, construction, print, color, labels, and exact logo geometry
 - Keeps one authoritative model face across every requested fashion variant, using the uploaded face when supplied
+- Maps every output to one exact SKU source so variants cannot be swapped, blended, duplicated, or recolored
+- Locks garment construction, protects important product details from occlusion, and separates product color from scene lighting
+- Checks reference readability and resolution before generation and can block low-quality sources before API spending
+- Directs complete hero/front/back/detail/lifestyle commerce shot lists instead of random variants
+- Uses localized rollback-safe repair and remembers rejected campaign defects for later outputs
+- Supports anchor approval checkpoints and video-ready continuity keyframe handoff
 - Keeps campaign palette, typography, grid, spacing, and logo zones consistent across a batch
 - Compares the complete batch through Campaign Vision Lock and repairs only visual outliers
 - Protects named silhouette, material, fabric, texture, construction, print, logo, label, color, and stitching truth regions
@@ -121,6 +127,8 @@ quality-report.json
 brand-profile.json
 reference-fidelity-report.json
 model-identity-report.json
+commerce-production-report.json
+video-continuity-pack.json
 diversity-report.json
 campaign-report.json
 draft-selection-report.json
@@ -150,7 +158,7 @@ Reference jobs default to strict fidelity. Generative editing remains high fidel
 
 ## Validation
 
-The 54-test deterministic suite covers separate ten-image output, provider cardinality, no-collage prompts, partial failures, targeted repair, uploaded-face and first-approved-model identity anchoring, face-drift repair, cross-image Campaign Vision Lock, product-region truth contracts, draft scoring/promotion, reference roles, multi-view product identity, automatic palettes, reusable brand profiles, campaign/diversity controls, duplicate detection, strict fidelity, cutout/shadow evidence, responsive typography, marketplace truth controls, unique platform exports, reporting, resume behavior, and ZIP packaging.
+The 61-test deterministic suite covers separate ten-image output, provider cardinality, no-collage prompts, partial failures, source-image localized repair, uploaded-face anchoring, face-drift repair, SKU mapping and assignment rejection, garment/visibility/color gates, reference preflight, approval checkpoints, defect memory, shot direction, video continuity packaging, cross-image Campaign Vision Lock, product-region truth contracts, drafts, reference roles, automatic palettes, strict fidelity, typography, exports, reporting, resume behavior, and ZIP packaging.
 
 ```bash
 python -m unittest discover -s rendriva-image-agent/scripts/tests -v
@@ -158,4 +166,4 @@ python -m unittest discover -s rendriva-image-agent/scripts/tests -v
 
 ## Status
 
-Rendriva v1.5 is ready for controlled testing with real image-generation credentials. Live face consistency, photorealism, and product preservation still depend on the selected model, reference quality, prompt constraints, and human review for high-stakes brand or product work.
+Rendriva v1.6 is ready for controlled testing with real image-generation credentials. Live face consistency, SKU accuracy, photorealism, and product preservation still depend on the selected model, source quality, prompt constraints, and human approval for high-stakes commerce work.

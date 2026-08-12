@@ -1,6 +1,6 @@
 ---
 name: rendriva-image-agent
-description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, same-face model variants, social ads, posters, logos, transparent DTF artwork, website hero graphics, mockups, reference-preserving edits, background changes, campaign batches, draft selection, and any request for multiple individually downloadable images. Apply professional art direction, reference-derived brand palettes, Single Model Face Lock, strict product-region truth locks, draft-to-final promotion, cross-image Campaign Vision Lock, per-image quality judging, and targeted repair so outputs look intentionally designed rather than generically AI-generated.
+description: Generate or edit one to ten high-quality images as separate outputs, never a collage unless explicitly requested. Use for professional product photography, apparel flat-lays, fashion images, same-face model and SKU variants, e-commerce shot lists, social ads, posters, logos, transparent DTF artwork, website heroes, mockups, reference-preserving edits, campaign batches, draft selection, and video-ready keyframes. Apply professional art direction, reference-derived brand palettes, Single Model Face Lock, SKU Variant Matrix, garment construction and product visibility locks, exact product-color QA, reference preflight, localized rollback-safe repair, Campaign Vision Lock, and per-image judging so outputs look intentionally designed rather than generically AI-generated.
 ---
 
 # Rendriva Image Agent
@@ -99,6 +99,19 @@ Use [references/professional-design-rubric.md](references/professional-design-ru
 - If a requested new angle, pose, fold, or view necessarily exposes unseen product detail, explain that literal preservation is impossible; ask for a matching source view or label the result as generative rather than exact.
 - Never promise pixel-identical reproduction from generative editing. Claim literal source preservation only for source-derived compositing.
 
+## Run the commerce-production suite
+
+- Map every requested output to exactly one uploaded SKU or product variant. Reject missing, duplicate, swapped, blended, or ambiguous assignments.
+- Attach only the assigned product variant to that output while retaining role-scoped logo, model, style, and campaign references.
+- Lock garment neckline, sleeves, hem, seams, stitching, pockets, buttons, straps, silhouette, length, fit, print, and labels. Never invent construction from an unseen angle.
+- Keep protected product details visibly judgeable. Reject poses, hair, hands, props, accessories, or crops that hide the logo, print, neckline, hem, silhouette, or label beyond the configured visibility target.
+- Separate scene lighting from product identity color. Reject SKU color drift even when the overall image remains attractive.
+- Inspect source readability and resolution before generation. Surface low-resolution, unreadable, obscured, or incomplete references, and block the run when strict preflight is requested.
+- Use the shot director to assign hero, front, three-quarter, back, detail, lifestyle, fabric, side, catalogue, and finale roles instead of relying on random variations.
+- When an approval checkpoint is enabled, generate only the anchor image and hold the remaining paid batch until the anchor is approved.
+- Carry rejected defects forward within the campaign so later outputs do not repeat padded contours, wrong sleeves, plastic skin, covered logos, malformed hands, or other observed failures.
+- Export approved keyframes with face, SKU, product, camera, and motion instructions when a video continuity handoff is requested.
+
 ## Handle text professionally
 
 - For a short label that is intentionally part of a scene, allow the image model to render it and judge spelling and legibility.
@@ -148,8 +161,9 @@ For every output:
 3. Under strict fidelity, fail the non-negotiable gate for any product material, fabric, construction, print, label, color, proportion, or logo drift—even if the result is attractive.
 4. Assign `PASS`, `NEEDS_REPAIR`, `FAILED`, or `BLOCKED`.
 5. Repair only the failed item, with a defect-specific repair prompt.
-6. Perform at most one automatic repair attempt unless the user explicitly authorizes more.
-7. Keep the better result and record the decision.
+6. Localize the repair to the smallest defective face, hand, anatomy, background, shadow, or text-safe region. Preserve passing regions and roll back candidates that introduce identity, product, logo, color, construction, or typography drift.
+7. Perform at most one automatic repair attempt unless the user explicitly authorizes more.
+8. Keep the better result and record the decision.
 
 Require all non-negotiable gates to pass and an average professional-design score of at least `4/5`. Do not label an output `PASS` only because it is visually attractive.
 
@@ -157,7 +171,7 @@ Require all non-negotiable gates to pass and an average professional-design scor
 
 - Present each image separately with its index and status.
 - For native generated images, let the host display and retain them; do not reconstruct them merely to make a ZIP.
-- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `model-identity-report.json`, `diversity-report.json`, `campaign-report.json`, `brand-profile.json`, `draft-selection-report.json`, optional drafts/platform exports, and `rendriva-output.zip`.
+- For adapter jobs, provide individual files plus `manifest.json`, `quality-report.json`, `reference-fidelity-report.json`, `model-identity-report.json`, `diversity-report.json`, `campaign-report.json`, `commerce-production-report.json`, `video-continuity-pack.json`, `brand-profile.json`, `draft-selection-report.json`, optional drafts/platform exports, and `rendriva-output.zip`.
 - Report exact failures and blocked capabilities. Never call a run complete beyond the available evidence.
 
 ## Production presets
